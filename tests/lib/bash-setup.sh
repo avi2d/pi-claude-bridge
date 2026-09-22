@@ -15,6 +15,28 @@ if [[ -f "$__ENV_FILE" ]]; then
 	set +a
 fi
 
+# macOS ships no `timeout`; without one every test below exits 127 and the suite
+# reports failures it never ran. perl is in the base system, unlike coreutils.
+if ! command -v timeout >/dev/null 2>&1; then
+	if command -v gtimeout >/dev/null 2>&1; then
+		timeout() { gtimeout "$@"; }
+	else
+		timeout() {
+			local seconds=$1
+			shift
+			perl -e '
+				my $seconds = shift;
+				my $child = fork;
+				if ($child == 0) { exec @ARGV or exit 127 }
+				$SIG{ALRM} = sub { kill "TERM", $child; waitpid $child, 0; exit 124 };
+				alarm $seconds;
+				waitpid $child, 0;
+				exit $? >> 8;
+			' "$seconds" "$@"
+		}
+	fi
+fi
+
 # Strip node_modules/.bin from PATH so we use the system pi, not the vendored one.
 __clean_path() {
 	echo "$PATH" | tr ':' '\n' | grep -v node_modules | tr '\n' ':'
