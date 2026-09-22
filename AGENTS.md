@@ -42,6 +42,22 @@ the failure in five minutes.
 
 Five wrong conclusions across two sessions came from skipping the above.
 
+## Adding a model
+
+The picker is built from pi-ai's static builtin catalog (`getModels("anthropic")`
+in `src/index.ts`), so an id pi-ai has not shipped never appears in `/model` —
+check `node_modules/@earendil-works/pi-ai/dist/providers/data/anthropic.json`
+before concluding a bridge change made a model reachable. `--model
+claude-bridge/<unlisted-id>` still launches, because pi's `buildFallbackModel`
+clones the provider's first registered model and overrides its id: the window
+that session reports comes from that clone, not from
+`resolveClaudeCodeRuntimeModel`.
+
+Measure before allowlisting: `node diag/context-size.mjs max <id>` records what
+the SDK actually serves (see `diag/CONTEXT-SIZE.md`), and
+`BRIDGE_MODEL=claude-bridge/<id> node --import tsx tests/int-served-window.mjs`
+shows served vs registered through a real pi session.
+
 ## Changelog
 
 Maintain an entry in the `## UNRELEASED` section at the top of `CHANGELOG.md` for every significant change, using the existing format:
@@ -68,3 +84,10 @@ No build step — the package ships `src` TypeScript as-is (see `files` in `pack
 ## Tests
 
 Smoke tests typically need to run outside a sandbox because they access local pi/Claude settings and auth state.
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.
