@@ -10,8 +10,9 @@ one trivial turn and records `result.modelUsage[*].contextWindow` plus error
 details. Auth is subscription OAuth (claude.ai), no `ANTHROPIC_API_KEY`.
 
 ```
-node diag/context-size.mjs pro        # current tier (pro | max)
-node diag/context-size.mjs --compare  # diff latest pro-* vs max-* JSON
+node diag/context-size.mjs pro                 # current tier (pro | max), all default ids
+node diag/context-size.mjs max claude-opus-5-5  # only the listed ids
+node diag/context-size.mjs --compare           # diff latest pro-* vs max-* JSON
 ```
 
 Raw JSON + MD per run save to `.test-output/context-size/` (gitignored).
@@ -32,6 +33,8 @@ the footnote below the table).
 
 | requested id              | Pro, credits off | Pro, credits on | Max, credits off | Max, credits on |
 |---------------------------|------------------|-----------------|------------------|-----------------|
+| `claude-opus-5-5`         | —                | —               | 1M               | —               |
+| `claude-opus-5-5[1m]`    | —                | —               | 1M               | —               |
 | `claude-opus-5`           | —                | —               | 200K             | —               |
 | `claude-opus-5[1m]`      | —                | —               | 1M               | —               |
 | `claude-opus-4-8`         | 200K             | 200K            | 200K             | 200K            |
@@ -49,7 +52,10 @@ the footnote below the table).
 | `claude-haiku-4-5`        | 200K             | 200K            | 200K             | 200K            |
 | `claude-haiku-4-5[1m]`   | 429†             | 400             | 400              | 400             |
 
-Raw runs: `.test-output/context-size/{pro,max}-2026-06-26T21-*.json`
+Raw runs: `.test-output/context-size/{pro,max}-2026-06-26T21-*.json`; the
+`claude-opus-5-5` rows are `max-2026-09-22T17-31-*.json` (SDK 0.3.280), the only
+model so far measured to serve 1M on the bare id as well as `[1m]` alongside
+`claude-opus-4-7`.
 
 `—` = not yet tested in that condition. Max-credits-on matched Pro-credits-on
 for every cell tested in both (shown for completeness).

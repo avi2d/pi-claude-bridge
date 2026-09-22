@@ -80,6 +80,7 @@ export type ClaudeCodeRuntimeModel = {
 // someone measures it (diag/context-size.mjs) and adds it here.
 const MEASURED_ONE_M = new Set([
 	"claude-fable-5",
+	"claude-opus-5-5",
 	"claude-fable-5-1",
 	"claude-opus-5",
 	"claude-opus-4-8",

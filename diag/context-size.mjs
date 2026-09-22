@@ -7,8 +7,9 @@
 // Run on the current subscription tier, then re-run after changing tiers; the
 // saved JSON/MD lets you compare served context sizes across plans and model ids.
 //
-//   node diag/context-size.mjs pro        # current tier label (pro | max)
-//   node diag/context-size.mjs --compare  # diff latest pro-* vs max-* JSON
+//   node diag/context-size.mjs pro                        # current tier label (pro | max)
+//   node diag/context-size.mjs max claude-opus-5-5        # only the listed ids
+//   node diag/context-size.mjs --compare                  # diff latest pro-* vs max-* JSON
 //
 // Uses the same subscription OAuth the bridge uses (do NOT set ANTHROPIC_API_KEY).
 // Each turn is a tiny "reply yes" prompt; some combos may error or spend metered
@@ -25,7 +26,8 @@ const DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUTDIR = join(DIR, ".test-output", "context-size");
 mkdirSync(OUTDIR, { recursive: true });
 
-const MODELS = ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-fable-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5"];
+const DEFAULT_MODELS = ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-fable-5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5"];
+const MODELS = process.argv.slice(3).length ? process.argv.slice(3) : DEFAULT_MODELS;
 const VARIANTS = ["bare", "1m"];
 const PER_CALL_MS = 120_000;
 const PROMPT = 'Reply with just the word "yes".';
