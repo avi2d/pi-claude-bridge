@@ -3,7 +3,8 @@
 // bridge prompt, the debug log must contain a "served contextWindow=…"
 // line emitted from consumeQuery's result handler (issue #18 diagnostics).
 //
-// Haiku keeps it cheap; the path is identical to opus/sonnet.
+// Haiku keeps it cheap; the path is identical to opus/sonnet. BRIDGE_MODEL in
+// the environment points the same check at another id.
 
 import { readFileSync, rmSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,7 +12,7 @@ import { join } from "node:path";
 import { createRpcHarness } from "./lib/rpc-harness.mjs";
 
 const TIMEOUT = 120_000;
-const BRIDGE_MODEL = "claude-bridge/claude-haiku-4-5";
+const BRIDGE_MODEL = process.env.BRIDGE_MODEL ?? "claude-bridge/claude-haiku-4-5";
 
 const testAgentDir = mkdtempSync(join(tmpdir(), "served-window-agent-"));
 writeFileSync(join(testAgentDir, "settings.json"), JSON.stringify({}));

@@ -513,17 +513,13 @@ function stubApi(requests) {
 	})));
 }
 
-test("includeGitInstructions:false strips gitStatus and keeps the preset static across git transitions", { timeout: 180_000 }, async () => {
-	// The claude_code preset embeds a gitStatus snapshot (git status --short +
-	// log -n 5) as the trailing suffix of the cached system block, and the
-	// bridge re-invokes CC every turn — so a git transition rewrites it and
-	// busts the prompt cache for the whole conversation from the system prompt
-	// onward (diag/probe-git-cache.mjs). The provider path sets
-	// includeGitInstructions:false for this reason; pin both sides: without it
-	// the block is present AND a git transition moves it (the break itself),
-	// with it the block is gone and the system prompt is byte-identical
-	// across a transition. This pins CC's behavior, not the bridge's call
-	// site — src/index.ts's provider options are the consumer.
+test("the claude_code preset carries no gitStatus, with or without includeGitInstructions:false", { timeout: 180_000 }, async () => {
+	// The bridge re-invokes CC every turn, so anything git-dependent in the
+	// cached system block busts the prompt cache for the whole conversation on
+	// every git transition (diag/probe-git-cache.mjs). src/index.ts sets
+	// includeGitInstructions:false against that; this pins CC's side of it.
+	// Both arms are asserted because the installed CC no longer embeds a
+	// gitStatus snapshot even by default: reintroducing one turns this red.
 	const requests = [];
 	const api = await stubApi(requests);
 	const repo = mkdtempSync(join(tmpdir(), "cc-gitpin-"));
@@ -544,17 +540,22 @@ test("includeGitInstructions:false strips gitStatus and keeps the preset static 
 		// compare those and pass for the wrong reason.
 		const presetReqs = () => requests.filter((b) => sysText(b).includes("You are an interactive agent"));
 
-		// Control: default preset carries the block, and a git transition moves
-		// it — the very break this test's positive side pins away.
-		const ctrl = await collect(query({ prompt: "Reply OK.", options: opts({}) }));
-		assert.ok(sysText(requests.at(-1)).includes("gitStatus:"),
-			"the preset no longer carries a gitStatus block — this test's negative side is obsolete");
+		// Default preset, dirty tree: no gitStatus block, and a git transition
+		// leaves the system prompt byte-identical. Both turns start a fresh
+		// session, because a resumed turn replays the prompt stored at session
+		// start and would compare equal whatever the preset does with git state.
+		writeFileSync(join(repo, "ctrl-dirty.txt"), "x\n");
+		await collect(query({ prompt: "Reply OK.", options: opts({}) }));
+		assert.ok(!sysText(requests.at(-1)).includes("gitStatus:"),
+			"the default preset carries a gitStatus block again — the bridge's includeGitInstructions:false is now load-bearing, and this test should pin both arms separately");
+		gitIn("add", "-A");
+		gitIn("commit", "-qm", "transition");
 		writeFileSync(join(repo, "ctrl-new.txt"), "x\n");
-		await collect(query({ prompt: "Reply OK.", options: opts({}, ctrl.result?.session_id) }));
-		assert.notDeepEqual(presetReqs().at(-2).system.slice(1), presetReqs().at(-1).system.slice(1),
-			"a git transition did not move the system prompt without the setting — the break this test guards no longer exists");
+		await collect(query({ prompt: "Reply OK.", options: opts({}) }));
+		assert.deepEqual(presetReqs().at(-2).system.slice(1), presetReqs().at(-1).system.slice(1),
+			"a git transition moved the default system prompt");
 
-		// With the setting: baseline, then a git transition, then resume.
+		// With the setting the bridge actually sends: same two properties.
 		const base = await collect(query({ prompt: "Reply OK.", options: opts({ includeGitInstructions: false }) }));
 		assert.equal(base.result?.subtype, "success");
 		writeFileSync(join(repo, "untracked.txt"), "x\n");
