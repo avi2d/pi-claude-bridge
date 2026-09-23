@@ -484,7 +484,7 @@ test("--thinking-display summarized is still an accepted flag value", { timeout:
 
 /** One-turn stub API: records every /v1/messages body, answers a canned "OK" SSE.
  *  Lets a contract assert on the exact request CC builds, at zero API cost. */
-function stubApi(requests) {
+function stubApi(requests, firstReply) {
 	const server = createServer((req, res) => {
 		const chunks = [];
 		req.on("data", (c) => chunks.push(c));
@@ -494,6 +494,10 @@ function stubApi(requests) {
 				requests.push(body);
 				const event = (name, obj) => `event: ${name}\ndata: ${JSON.stringify(obj)}\n\n`;
 				res.writeHead(200, { "content-type": "text/event-stream" });
+				if (firstReply && requests.length === 1) {
+					res.end(firstReply);
+					return;
+				}
 				res.end(
 					event("message_start", { type: "message_start", message: { id: `msg_stub_${requests.length}`, type: "message", role: "assistant", content: [], model: body.model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } } })
 					+ event("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })
@@ -575,4 +579,92 @@ test("the claude_code preset carries no gitStatus, with or without includeGitIns
 		api.close();
 		rmSync(repo, { recursive: true, force: true });
 	}
+});
+
+// --- Mid-turn steer placement after an MCP tool result ---
+
+const STEER_TEXT = "STOP. Do not call SlowTool again. Reply with only the word BANANA.";
+
+// One MCP tool_use first, so the probe has a tool boundary for the queued
+// steer to drain at. Later requests get the OK.
+function steerFirstReply() {
+	const event = (name, obj) => `event: ${name}\ndata: ${JSON.stringify(obj)}\n\n`;
+	const usage = { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+	return event("message_start", { type: "message_start", message: { id: "msg_stub_tool", type: "message", role: "assistant", content: [], model: "stub", stop_reason: null, stop_sequence: null, usage } })
+		+ event("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_stub_1", name: "mcp__custom-tools__SlowTool", input: {} } })
+		+ event("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"seconds":1}' } })
+		+ event("content_block_stop", { type: "content_block_stop", index: 0 })
+		+ event("message_delta", { type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 5 } })
+		+ event("message_stop", { type: "message_stop" });
+}
+
+// Returns where CC put a mid-turn steer after an MCP tool call: "system",
+// "tool_result", "sibling", or "absent". Runs against the stub: zero API cost.
+async function steerPlacement(model) {
+	const requests = [];
+	const api = await stubApi(requests, steerFirstReply());
+	try {
+		const server = new McpServer({ name: "custom-tools", version: "1.0.0" }, { capabilities: { tools: {} } });
+		server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [{ name: "SlowTool", description: "Sleeps, then reports completion.", inputSchema: { type: "object", properties: { seconds: { type: "number" } } } }] }));
+		server.server.setRequestHandler(CallToolRequestSchema, async () => {
+			await new Promise((r) => setTimeout(r, 2000));
+			return { content: [{ type: "text", text: "SlowTool completed after 2000ms" }] };
+		});
+
+		let push;
+		const pending = [];
+		async function* input() {
+			yield { type: "user", message: { role: "user", content: "Call SlowTool with seconds=1 once, then stop." }, parent_tool_use_id: null };
+			while (true) {
+				const msg = pending.shift() ?? (await new Promise((r) => (push = r)));
+				if (msg === null) return;
+				yield msg;
+			}
+		}
+		const sendMsg = (m) => (push ? (push(m), (push = undefined)) : pending.push(m));
+		const q = query({
+			prompt: input(),
+			options: providerOptions({
+				model,
+				env: { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" },
+				mcpServers: { "custom-tools": { type: "sdk", name: "custom-tools", instance: server } },
+			}),
+		});
+		let steered = false;
+		for await (const m of q) {
+			if (m.type === "assistant" && !steered) {
+				for (const b of m.message.content ?? []) {
+					if (b.type === "tool_use") {
+						steered = true;
+						sendMsg({ type: "user", message: { role: "user", content: STEER_TEXT }, parent_tool_use_id: null, priority: "next" });
+					}
+				}
+			}
+			if (m.type === "result") {
+				sendMsg(null);
+				break;
+			}
+		}
+		assert.ok(steered, "the stubbed tool_use never surfaced — the probe proved nothing");
+	} finally {
+		api.close();
+	}
+	for (const body of requests) {
+		const holder = (body.messages ?? []).find((m) => JSON.stringify(m).includes("sent a new message"));
+		if (!holder) continue;
+		if (holder.role === "system") return "system";
+		if ((holder.content ?? []).some((b) => b.type === "tool_result" && JSON.stringify(b.content).includes("sent a new message"))) return "tool_result";
+		return "sibling";
+	}
+	return "absent";
+}
+
+test("mid-turn steer after an MCP tool result rides a system message on opus-5-5", { timeout: 120_000 }, async () => {
+	assert.equal(await steerPlacement("claude-opus-5-5"), "system",
+		"CC moved the steer — expected a mid-conversation role:\"system\" message");
+});
+
+test("mid-turn steer after an MCP tool result rides inside tool_result.content on haiku-4-5", { timeout: 120_000 }, async () => {
+	assert.equal(await steerPlacement("claude-haiku-4-5"), "tool_result",
+		"CC moved the steer — expected it folded into tool_result.content");
 });

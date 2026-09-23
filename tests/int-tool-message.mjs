@@ -11,9 +11,14 @@ import { createRpcHarness } from "./lib/rpc-harness.mjs";
 
 const TEST_TIMEOUT = 40_000;
 
+// CC >=2.1.268 folds a mid-turn steer into MCP tool_result content, which haiku
+// reads as prompt injection and ignores. Only system-message-path models obey.
+const MODEL = process.env.BRIDGE_TOOL_MESSAGE_MODEL ?? "claude-sonnet-5";
+const OBEYS_STEER = ["claude-sonnet-5", "claude-opus-5-5", "claude-opus-4-8"].includes(MODEL);
+
 const harness = createRpcHarness({
 	name: "tool-message",
-	args: ["-e", "./tests/fixtures/slow-tool-extension.ts", "--model", "claude-bridge/claude-haiku-4-5"],
+	args: ["-e", "./tests/fixtures/slow-tool-extension.ts", "--model", `claude-bridge/${MODEL}`],
 	defaultTimeout: TEST_TIMEOUT,
 });
 
@@ -109,6 +114,7 @@ describe("tool-message integration", () => {
 
 	it("parallel tool calls with steer delivers all results", { timeout: TEST_TIMEOUT }, async () => {
 		const collector = collectText();
+		const mark = logMark();
 		await send({
 			type: "prompt",
 			message: "Call SlowTool three times in parallel: seconds=3, seconds=4, seconds=5. Then list all three results.",
@@ -128,8 +134,16 @@ describe("tool-message integration", () => {
 		// Delivery only forwards a steer when the trailing message is a user message.
 		// Pi injects drained steers between tool results too (see extract-tool-results),
 		// and in that shape the steer would be dropped and the cursor advanced past it,
-		// so Claude never sees it. Asserting results survive does not catch that.
-		assert.match(text.toLowerCase(), /papaya/, `Steer during parallel tools not visible to assistant: ${text.slice(0, 300)}`);
+		// so Claude never sees it. Asserting results survive does not catch that, and a
+		// model-echo assert is unreliable on the fold path: there CC delivers the steer
+		// as a <system-reminder> inside the tool_result content, which its own
+		// prompt-injection guidance tells the model to distrust. Assert the transport
+		// fact instead, with echo as corroboration only where the model obeys.
+		const records = readSessionRecords(sessionIdFrom(logSince(mark)));
+		assert.ok(records.some((r) => JSON.stringify(r.attachment ?? "").includes("PAPAYA")
+				|| JSON.stringify(r.message?.content ?? "").includes("PAPAYA")),
+			`steer never reached CC's session — dropped between the parallel tool results`);
+		if (OBEYS_STEER) assert.match(text.toLowerCase(), /papaya/, `Steer during parallel tools not visible to assistant: ${text.slice(0, 300)}`);
 	});
 
 	it("steer during text response (no tool call) completes both turns", { timeout: TEST_TIMEOUT }, async () => {
@@ -137,6 +151,10 @@ describe("tool-message integration", () => {
 		// calls), a steer arrives, and pi delivers it after the current turn ends.
 		// Risk: if activeQuery hasn't been cleared by the time pi calls streamSimple
 		// for the steer, the bridge enters the tool-result-delivery path incorrectly.
+		// A rejected steer poisons the plain turns after it in the same session, so
+		// the text-only steers run in a fresh one.
+		await send({ type: "new_session" });
+		const mark = logMark();
 		const collector = collectText();
 		await send({
 			type: "prompt",
@@ -154,7 +172,13 @@ describe("tool-message integration", () => {
 		});
 		await waitForEvent("agent_end");
 		const text = collector.stop();
-		assert.match(text.toLowerCase(), /pineapple/);
+		if (OBEYS_STEER) {
+			assert.match(text.toLowerCase(), /pineapple/);
+		} else {
+			const records = readSessionRecords(sessionIdFrom(logSince(mark)));
+			assert.ok(records.some((r) => JSON.stringify(r.message?.content ?? "").includes("PINEAPPLE")),
+				"text-only steer never reached CC's session");
+		}
 	});
 
 	it("steer during tool execution is visible to assistant", { timeout: 20_000 }, async () => {
@@ -163,6 +187,7 @@ describe("tool-message integration", () => {
 		// sees activeQuery=true, enters tool-result-delivery mode, extracts the tool
 		// result, but silently ignores the trailing user message (the steer). Claude
 		// never sees the steer content.
+		const mark = logMark();
 		const collector = collectText();
 		await send({
 			type: "prompt",
@@ -176,7 +201,14 @@ describe("tool-message integration", () => {
 		});
 		await waitForEvent("agent_end");
 		const text = collector.stop();
-		assert.match(text.toLowerCase(), /mango/, `Steer content not visible to assistant: ${text.slice(0, 300)}`);
+		// Model echo is corroboration only where CC steers with a system message:
+		// on the fold path the steer arrives inside the tool_result content, which
+		// the model is told to distrust.
+		const records = readSessionRecords(sessionIdFrom(logSince(mark)));
+		assert.ok(records.some((r) => JSON.stringify(r.attachment ?? "").includes("MANGO")
+				|| JSON.stringify(r.message?.content ?? "").includes("MANGO")),
+			"steer during tool execution never reached CC's session — dropped at delivery");
+		if (OBEYS_STEER) assert.match(text.toLowerCase(), /mango/, `Steer content not visible to assistant: ${text.slice(0, 300)}`);
 	});
 
 	it("steer is drained at the tool boundary, mid-turn", { timeout: 90_000 }, async () => {
@@ -221,7 +253,8 @@ describe("tool-message integration", () => {
 			"CC never responded after draining the steer");
 
 		// Corroborating, not proof: the model should abandon its 12-call loop.
-		assert.ok(toolStarts <= 6, `${toolStarts} of 12 tool calls ran before Claude acted on the steer`);
+		// Retired on the fold path, where the model is told to distrust the steer.
+		if (OBEYS_STEER) assert.ok(toolStarts <= 6, `${toolStarts} of 12 tool calls ran before Claude acted on the steer`);
 	});
 
 	it("steer at a text-only boundary is not pushed into the active query", { timeout: TEST_TIMEOUT }, async () => {
@@ -239,6 +272,7 @@ describe("tool-message integration", () => {
 		// path), and the race itself is timing-dependent, so read this as a
 		// tripwire against a future change that starts pushing text-only steers —
 		// not as proof the race is handled.
+		await send({ type: "new_session" });
 		const mark = logMark();
 		const collector = collectText();
 		await send({
@@ -258,7 +292,7 @@ describe("tool-message integration", () => {
 		const text = collector.stop();
 		const log = logSince(mark);
 
-		assert.match(text.toLowerCase(), /kiwi/);
+		if (OBEYS_STEER) assert.match(text.toLowerCase(), /kiwi/);
 		assert.doesNotMatch(log, /steer written to CC stdin/, "text-only steer was pushed into the active query's input stream");
 		assert.doesNotMatch(log, /steer push rejected/, "text-only steer reached the push path at all");
 	});
