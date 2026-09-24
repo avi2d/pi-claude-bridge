@@ -15,7 +15,7 @@ import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSetti
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
-import { QueryContext, ctx } from "./query-state.js";
+import { QueryContext, ctx, resetCtx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } from "./config.js";
 import {
@@ -238,6 +238,9 @@ function readCarriedAttachments(sessionId: string, cwd: string): CarriedAttachme
 }
 
 let sharedSession: SessionState | null = null;
+
+// Bumped by every pi-side history rewrite (compact, tree navigation).
+let historyGeneration = 0;
 
 // Convert pi messages to Anthropic API format for session import.
 // Lossy: only text, thinking and toolCall blocks survive, and thinking only when
@@ -770,6 +773,10 @@ export const __test = {
 	resultErrorText,
 	deliverToolResults,
 	drainForAbort,
+	discardSupersededQuery,
+	get activeQueryContexts() {
+		return activeQueryContexts;
+	},
 	CC_CHILD_ENV,
 	buildMcpServers,
 	branchSummaryOutcome,
@@ -1487,6 +1494,27 @@ function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
 	c.releasePendingToolCalls("Operation aborted");
 }
 
+// Rebuilding under the old session id would race the dying subprocess's last
+// writes into the new file, so the rebuild rotates, as it does after an abort.
+function discardSupersededQuery(c: QueryContext): void {
+	c.superseded = true;
+	activeQueryContexts.delete(c);
+	const sdkQuery = c.activeQuery;
+	c.activeQuery = null;
+	if (c === ctx()) resetCtx();
+	if (sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+	debug(`provider: pi rewrote the conversation under a parked query, discarding it (generation ${c.historyGeneration} → ${historyGeneration})`);
+	// Interrupt, and only then close: close() fails the parked tool call, and Claude
+	// Code sends that failure on to the model with the whole old context.
+	void sdkQuery?.interrupt()
+		.catch(() => {})
+		.finally(() => {
+			try { sdkQuery.close(); } catch {}
+		});
+}
+
+const RESUME_AFTER_TOOL_RESULT = "Continue from where you left off.";
+
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
@@ -1501,9 +1529,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
 	debug(`provider: streamClaudeAgentSdk called, activeQuery=${!!ctx().activeQuery}, lastMsgRole=${lastMsgRole}, isReentrant=${ctx().activeQuery !== null}`);
 
-	const activeQuery = ctx().activeQuery !== null;
 	const allResults = activeQueryContexts.size > 0 ? extractAllToolResults(context) : [];
-	const resultCtx = allResults.length > 0 ? contextForToolResults(allResults) : undefined;
+	const ownerCtx = allResults.length > 0 ? contextForToolResults(allResults) : undefined;
+	// A compaction that fires mid-reply leaves the query that asked for these results
+	// parked on a conversation pi has replaced. Delivering into it continues that one.
+	const supersededCtx = ownerCtx === ctx() && ownerCtx.historyGeneration !== historyGeneration ? ownerCtx : undefined;
+	if (supersededCtx) discardSupersededQuery(supersededCtx);
+	const resultCtx = supersededCtx ? undefined : ownerCtx;
+	const activeQuery = ctx().activeQuery !== null;
 	const isReentrantUserQuery = activeQuery && lastMsgRole === "user" && allResults.length === 0;
 	if (isReentrantUserQuery) {
 		debug(`provider: active query user-only call treated as reentrant fresh query, waitingHandlers=${ctx().pendingToolCalls.size}, ctx.msgs=${context.messages.length}`);
@@ -1537,7 +1570,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// The query is gone but pi still delivered the result. Nothing to do — just
 	// emit end_turn so pi waits for the next real user message.
 	const lastMsg = context.messages[context.messages.length - 1];
-	if (lastMsg?.role === "toolResult") {
+	if (lastMsg?.role === "toolResult" && !supersededCtx) {
 		debug(`provider: orphaned tool result after abort, emitting end_turn`);
 		if (sharedSession && activeQueryContexts.size === 0) sharedSession.cursor = context.messages.length;
 		// No query owns this result, so there is no context to reset: resetTurnState
@@ -1591,6 +1624,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.turnToolCallIds = [];
 	queryCtx.resetTurnState(model);
 	queryCtx.latestCursor = 0;
+	queryCtx.historyGeneration = historyGeneration;
 
 	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
 	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
@@ -1599,7 +1633,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel);
 	const { sessionId: resumeSessionId } = syncResult;
 	const promptBlocks = extractUserPromptBlocks(context.messages);
-	let promptText = extractUserPrompt(context.messages) ?? "";
+	let promptText = extractUserPrompt(context.messages) ?? (supersededCtx ? RESUME_AFTER_TOOL_RESULT : "");
 
 	// Guard: empty prompt means the last context message isn't a user message.
 	// This should never happen with per-query state — dump diagnostics if it does.
@@ -1727,7 +1761,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// Background consumer — runs until query ends
 	consumeQuery(sdkQuery, customToolNameToPi, model, () => wasAborted, queryCtx)
 		.then(async ({ capturedSessionId }) => {
-			debug(`provider: consumeQuery completed, stopReason=${queryCtx.turnOutput?.stopReason}, error=${queryCtx.turnOutput?.errorMessage}, aborted=${wasAborted}`);
+			debug(`provider: consumeQuery completed, stopReason=${queryCtx.turnOutput?.stopReason}, error=${queryCtx.turnOutput?.errorMessage}, aborted=${wasAborted}, superseded=${queryCtx.superseded}`);
+			if (queryCtx.superseded) return;
 
 			// --- Abort detection in normal completion path ---
 			if (wasAborted || options?.signal?.aborted) {
@@ -1755,8 +1790,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				debug(`provider: query done, ignoring captured session ${capturedSessionId?.slice(0, 8) ?? "none"} to preserve shared session`);
 			} else if (sessionId) {
 				const cursor = Math.max(context.messages.length, queryCtx.latestCursor, sharedSession?.cursor ?? 0);
-				debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
-				sharedSession = { sessionId, cursor, cwd };
+				const rewrittenSinceSync = queryCtx.historyGeneration !== historyGeneration;
+				debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}${rewrittenSinceSync ? ", history rewritten since sync, keeping needsRebuild" : ""}`);
+				sharedSession = { sessionId, cursor, cwd, ...(rewrittenSinceSync ? { needsRebuild: true } : {}) };
 			}
 
 			if (!isReentrant && queryCtx.activeQuery === sdkQuery) {
@@ -1766,7 +1802,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			finalizeCurrentStream(queryCtx, queryCtx.turnOutput?.stopReason);
 		})
 		.catch((error) => {
-			debug(`provider: query error, model=${cliModel}, aborted=${Boolean(options?.signal?.aborted)}, error=`, error);
+			debug(`provider: query error, model=${cliModel}, aborted=${Boolean(options?.signal?.aborted)}, superseded=${queryCtx.superseded}, error=`, error);
+			if (queryCtx.superseded) return;
 			if ((wasAborted || options?.signal?.aborted) && sharedSession) {
 				sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
 			} else {
@@ -2163,6 +2200,7 @@ export default function (pi: ExtensionAPI) {
 	// triggers CC's autocompact-thrashing guard (issue #8). Force the next
 	// call down the REBUILD path so CC sees the current history.
 	const markRebuild = (event: string) => {
+		historyGeneration++;
 		if (sharedSession) {
 			debug(`${event}: marking needsRebuild on session ${sharedSession.sessionId.slice(0, 8)}`);
 			sharedSession = { ...sharedSession, needsRebuild: true };

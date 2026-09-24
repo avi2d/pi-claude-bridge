@@ -6,6 +6,7 @@
 //
 // Extracted from index.ts so tests can import without activating the extension.
 
+import type { Query } from "@anthropic-ai/claude-agent-sdk";
 import type { AssistantMessage, AssistantMessageEventStream, Model } from "@earendil-works/pi-ai";
 import type { McpResult } from "./extract-tool-results.js";
 import type { PromptStream } from "./prompt-stream.js";
@@ -17,7 +18,11 @@ export interface PendingToolCall {
 
 export class QueryContext {
 	// Query-scoped (fully isolated per query)
-	activeQuery: unknown | null = null;
+	activeQuery: Query | null = null;
+	// Which of pi's histories this query's Claude Code session was synced to.
+	historyGeneration = 0;
+	// Discarded for a newer history: its completion must leave the shared session alone.
+	superseded = false;
 	currentPiStream: AssistantMessageEventStream | null = null;
 	latestCursor = 0;
 	pendingToolCalls = new Map<string, PendingToolCall>();
@@ -78,8 +83,7 @@ let _ctx = new QueryContext();
 
 export function ctx(): QueryContext { return _ctx; }
 
-// Test-only: replace the module-level context so test files start clean.
-// Not called from production.
+// Whoever holds the previous context keeps it; only ctx() moves.
 export function resetCtx(): void {
 	_ctx = new QueryContext();
 }
