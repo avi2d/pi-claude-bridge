@@ -85,6 +85,8 @@ No build step — the package ships `src` TypeScript as-is (see `files` in `pack
 
 Smoke tests typically need to run outside a sandbox because they access local pi/Claude settings and auth state.
 
+An end-to-end reproduction needs no API spend: `tests/int-compact-midreply.mjs` runs pi, the bridge and a real Claude Code against a scripted stub Messages API through `ANTHROPIC_BASE_URL`, and asserts on the request bodies CC sent.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
