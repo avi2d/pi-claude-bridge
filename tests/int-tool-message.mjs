@@ -226,9 +226,6 @@ describe("tool-message integration", () => {
 		// prompt with no attachment at all.
 		const mark = logMark();
 		const steerText = "STOP. Do not call SlowTool again. Reply with only the word BANANA.";
-		let toolStarts = 0;
-		const removeCounter = addListener((msg) => { if (msg.type === "tool_execution_start") toolStarts++; });
-
 		await send({
 			type: "prompt",
 			message: "Call SlowTool with seconds=1 exactly 12 times, strictly one at a time — wait for each result before starting the next. Do not call it twice in the same message.",
@@ -236,7 +233,6 @@ describe("tool-message integration", () => {
 		await waitForEvent("tool_execution_start");
 		await send({ type: "prompt", message: steerText, streamingBehavior: "steer" });
 		await waitForEvent("agent_end");
-		removeCounter();
 
 		const records = readSessionRecords(sessionIdFrom(logSince(mark)));
 		const steerAt = records.findIndex((r) => r.attachment?.type === "queued_command"

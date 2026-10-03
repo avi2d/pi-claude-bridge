@@ -17,14 +17,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { activateWithMockPi } from "./lib/mock-pi.mjs";
 
-const { default: activate, __test } = await import("../src/index.js");
-
-function activateWithMockPi() {
-	const handlers = new Map();
-	activate({ on: (event, handler) => handlers.set(event, handler), registerProvider: () => {}, registerTool: () => {} });
-	return handlers;
-}
+const { __test } = await import("../src/index.js");
 
 const PRE_WIDEN = "You are pi.\n# Tools\n- read: Read a file\n\npi packages (docs/packages.md)";
 // Same prefix, then the MCP tool descriptions that only appear post-connect.
@@ -90,8 +85,8 @@ describe("turn_start prompt capture", () => {
 		});
 		handlers.get("agent_start")({}, { getSystemPrompt: () => WIDENED });
 
-		// A later in-run turn renders a new prompt (mid-run tool-loadout change on
-		// 0.85.1, section re-render on newer pi). turn_start re-keys it.
+		// A later in-run turn renders a new prompt (mid-run tool-loadout change,
+		// section re-render). turn_start re-keys it.
 		const turnTwo = `${WIDENED}\n# Tools\n- git_status: Report repo state\n`;
 		handlers.get("turn_start")({}, { getSystemPrompt: () => turnTwo });
 

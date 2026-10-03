@@ -1,46 +1,39 @@
-import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
-import * as piAi from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type Context, type ImageContent, type Model, type SimpleStreamOptions, type TextContent, type Tool, type UserMessage } from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
 import { buildSessionContext, compact, generateBranchSummary, keyHint, type BranchSummaryResult, type CompactionEntry, type ExtensionAPI, type ExtensionContext, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
-import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
-import { homedir } from "os";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
+import { DEBUG_LOG_PATH, DIAG_LOG_PATH } from "./log-paths.js";
 import { applyLongContext, buildModels, claudeCodeModelId, type LongContextSettings, resolveModel as _resolveModel } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, renderSkillsBlock } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
-import { QueryContext, ctx, resetCtx } from "./query-state.js";
+import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } from "./config.js";
 import {
 	collectPromptSkills,
 	projectPromptCapture,
 	sharedPromptCaptures,
+	type PromptCapture,
 } from "./prompt-capture.js";
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
+import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, resolveAskClaudeDefaults, resolveAskClaudeMode, type AskClaudeMode } from "./askclaude-schema.js";
 import { nonSystemMessages, toBridgeContext } from "./transcript.js";
-
-// Compat (#2): use factory if available (pi-ai ≥0.66), else fall back to constructor (gsd-pi etc.)
-const _piAi = piAi as any;
-const newAssistantMessageEventStream: () => AssistantMessageEventStream =
-	typeof _piAi.createAssistantMessageEventStream === "function"
-		? _piAi.createAssistantMessageEventStream
-		: () => new _piAi.AssistantMessageEventStream();
+import { updateUsage, type SdkUsage } from "./usage.js";
 
 // --- Debug logging ---
-// CLAUDE_BRIDGE_DEBUG=1 enables debug logging to ~/.pi/agent/claude-bridge.log
+// CLAUDE_BRIDGE_DEBUG=1 enables debug logging to the bridge log in pi's agent
+// dir (log-paths.ts), not a fixed ~/.pi/agent.
 
 const DEBUG = process.env.CLAUDE_BRIDGE_DEBUG === "1";
-const DEBUG_LOG_PATH = process.env.CLAUDE_BRIDGE_DEBUG_PATH || join(homedir(), ".pi", "agent", "claude-bridge.log");
-const DIAG_LOG_PATH = join(homedir(), ".pi", "agent", "claude-bridge-diag.log");
 
 // CLAUDE_BRIDGE_RECORD_STREAM=<path> appends every SDK message consumeQuery sees,
 // one JSON object per line. Used by tests/lib/record-sdk-streams.mjs to capture
@@ -62,23 +55,22 @@ const CC_CHILD_ENV = {
 } as const;
 
 // Pi owns context files on the provider path, so Claude Code must not load its
-// own on top: otherwise a project CLAUDE.md arrives twice, and the user's
-// ~/.claude/CLAUDE.md — a persona written for a harness that is not the one
-// running — arrives at all, stamped "These instructions OVERRIDE any default
+// own on top: otherwise project CLAUDE.md/AGENTS.md files arrive twice, and
+// ~/.claude/CLAUDE.md — a user persona written for a harness that is not the
+// one running — arrives at all, stamped "These instructions OVERRIDE any default
 // behavior" and outranking Pi's own AGENTS.md.
 //
 // Excludes rather than settingSources: the source gate that suppresses CLAUDE.md
 // is the same one that reads settings.json, where Bedrock/Vertex users keep
 // `env` and `apiKeyHelper`. Patterns are matched with picomatch against absolute
-// paths; "**/CLAUDE.md" covers the user, ancestor, project and .claude/ copies,
+// paths; the filename globs cover user, ancestor, project and .claude/ copies,
 // while rules need their own. Managed/policy memory is not excludable by design.
-const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/.claude/rules/**"];
+const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/AGENTS.md", "**/.claude/rules/**"];
 
-// Ensure log directories exist when debug is enabled
+// Ensure the debug log directory exists when debug is enabled
 if (DEBUG) {
 	try {
 		mkdirSync(dirname(DEBUG_LOG_PATH), { recursive: true });
-		mkdirSync(dirname(DIAG_LOG_PATH), { recursive: true });
 	} catch {
 		// If directory creation fails, debug functions will throw on first use
 	}
@@ -125,10 +117,12 @@ function makeCliDebugOptions(tag: string): { debug?: boolean; debugFile?: string
 	};
 }
 
-/** Unconditional diagnostic dump — for "should never happen" paths */
+/** Unconditional diagnostic dump — for "should never happen" paths. Creates pi's agent
+ *  dir itself: callers run inside streamSimple, where a missing dir must not throw. */
 function diagDump(label: string, data: Record<string, unknown>) {
 	const ts = new Date().toISOString();
 	const entry = { ts, moduleInstanceId, label, ...data };
+	mkdirSync(dirname(DIAG_LOG_PATH), { recursive: true });
 	appendFileSync(DIAG_LOG_PATH, JSON.stringify(entry) + "\n");
 	debug(`DIAG: ${label} (see ${DIAG_LOG_PATH})`);
 }
@@ -176,10 +170,8 @@ const ASKCLAUDE_ALWAYS_BLOCKED = [
 	"ToolSearch", // probes for blocked tools, wastes tokens
 	"ScheduleWakeup", // no harness to fire wakeup from inside a delegated subagent
 ];
-const MODE_DISALLOWED_TOOLS: Record<string, string[]> = {
-	full: [
-		...ASKCLAUDE_ALWAYS_BLOCKED,
-	],
+const MODE_DISALLOWED_TOOLS: Record<AskClaudeMode, string[]> = {
+	full: ASKCLAUDE_ALWAYS_BLOCKED,
 	read: [
 		...ASKCLAUDE_ALWAYS_BLOCKED,
 		"Write", "Edit", "Bash", "NotebookEdit",
@@ -200,19 +192,25 @@ interface SessionState {
 	sessionId: string;
 	cursor: number;
 	cwd: string;
+	// The pi session this CC conversation serves, from the provider call's
+	// options.sessionId. Attribution for history rewrites: a subagent's
+	// session_compact must not force a rebuild of a conversation that belongs
+	// to a different pi session. Null until a provider call recorded it.
+	piSessionId?: string;
 	// Force the next syncSharedSession call down the REBUILD path. Set when
 	// pi has mutated its messages array out from under us (compact, tree
 	// navigation) or after an abort left the JSONL in an indeterminate state.
 	// REBUILD wipes and rewrites the file to match pi's current history.
 	needsRebuild?: boolean;
-	// Set ONLY after an abort. The killed CC subprocess may still be flushing
-	// a late "[Request interrupted by user]" record to the session JSONL.
-	// Reusing the same sessionId/path would race that orphan write into our
-	// fresh file and break CC's parent-uuid chain on the next resume. When
-	// this flag is set, REBUILD takes a fresh UUID and skips deleteSession
-	// so the orphan writes land on a dead inode. Compact/tree do NOT set
-	// this — there's no concurrent CC writer during those events, so
-	// in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
+	// Set ONLY where we have just killed a CC subprocess: an abort, or a query
+	// discarded because pi rewrote the history under it. The killed subprocess
+	// may still be flushing a late "[Request interrupted by user]" record to the
+	// session JSONL. Reusing the same sessionId/path would race that orphan write
+	// into our fresh file and break CC's parent-uuid chain on the next resume.
+	// When this flag is set, REBUILD takes a fresh UUID and skips deleteSession
+	// so the orphan writes land on a dead inode. A compact or tree navigation
+	// with no query in flight does NOT set this — there's no concurrent CC writer
+	// then, so in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
 	forceRotate?: boolean;
 }
 
@@ -237,10 +235,105 @@ function readCarriedAttachments(sessionId: string, cwd: string): CarriedAttachme
 	}
 }
 
-let sharedSession: SessionState | null = null;
+/** The session key a pi session's provider calls address. Unattributed calls
+ *  (no options.sessionId — AskClaude's direct sync, or a host that omits it)
+ *  share the "(none)" bucket: they cannot be told apart, so they share the
+ *  pre-existing single-slot semantics. */
+function sessionKey(piSessionId: string | null | undefined): string {
+	return piSessionId ?? "(none)";
+}
 
-// Bumped by every pi-side history rewrite (compact, tree navigation).
-let historyGeneration = 0;
+/** Mirror of the CC conversation one pi session's turns are running on. One
+ *  entry per pi session: a bridge process serves several sessions at once
+ *  (pi-subagents children run their own AgentSessions), and a single shared
+ *  slot forced them to fight over it — a length-matching foreign sync could
+ *  REUSE or rebuild another session's CC file, and the completion capture was
+ *  last-writer-wins (a foreground child in the parent's first turn permanently
+ *  reassigned the parent's conversation). Keyed lookup removes the fight: each
+ *  session's reads, writes and teardown marks touch only its own mirror. */
+const sharedSessions = new Map<string, SessionState>();
+
+/** The mirror for `piSessionId`, or null when this session has none yet. */
+function sessionStateFor(piSessionId: string | null | undefined): SessionState | null {
+	return sharedSessions.get(sessionKey(piSessionId)) ?? null;
+}
+
+/** Replace (or plant) the mirror for `piSessionId`. */
+function setSessionStateFor(piSessionId: string | null | undefined, state: SessionState | null): void {
+	if (state === null) sharedSessions.delete(sessionKey(piSessionId));
+	else sharedSessions.set(sessionKey(piSessionId), state);
+}
+
+// pi replaced one of its sessions' history (compact, tree) rather than appending
+// to it. Read on the tool-result path — the one provider call that never reaches
+// syncSharedSession — so a query parked at a tool boundary is discarded rather
+// than resumed (issue #101). Keyed by pi session id, not process-global: a bridge
+// process serves several pi sessions at once (subagents run their own
+// AgentSessions and can compact mid-run while the parent is parked), and
+// marking across that boundary kills healthy queries (or, worse, rebuilds the
+// parent around a compaction that never touched it).
+//
+// Holds real pi session ids only, never the "(none)" key: no production caller
+// marks with null (the rewrite events attribute via ctx.sessionManager), and
+// every reader guards on a non-null piSessionId — so a "(none)" entry could
+// never be matched or consumed, only leaked.
+const historyRewrittenBySession = new Set<string>();
+
+/** Handlers that arm rewrite staleness, one per module instance. Worktree-
+ *  spawned subagents can load this module fresh (pi's loader cache is keyed on
+ *  cwd, and a worktree cwd clears it), while the serving instance — whose
+ *  streamSimple the pi sessions actually call — is whoever registered first.
+ *  A fresh instance must forward its session's rewrites to the serving one.
+ *  Symbol.for: one registry per process, like SHARED_CAPTURES_KEY below. */
+const MARK_REBUILD_HOOKS_KEY = Symbol.for("claude-bridge:markRebuildHooks");
+type MarkRebuildHook = (piSession: string | null, event: string) => void;
+const markRebuildHooks: Set<MarkRebuildHook> =
+	((globalThis as Record<symbol, unknown>)[MARK_REBUILD_HOOKS_KEY] as Set<MarkRebuildHook> | undefined) ?? new Set();
+(globalThis as Record<symbol, unknown>)[MARK_REBUILD_HOOKS_KEY] = markRebuildHooks;
+
+/** pi mutated its messages array out from under us: force the next
+ *  syncSharedSession down REBUILD, and arm the discard above. `piSession`
+ *  is never null from an event handler (each pi session has its own runner).
+ *  The "(none)" key still covers the mirror for a hypothetical direct caller
+ *  with no session id, so such a rewrite forces the REBUILD side; the discard
+ *  set holds real ids only — see the comment on historyRewrittenBySession. */
+function markRebuildForSession(piSession: string | null, event: string): void {
+	// The rewriting session's own mirror: the rewrite changed the history it was
+	// built from, so its next sync must REBUILD rather than REUSE. Every other
+	// session's mirror stays untouched — its conversation was never rewritten.
+	const key = sessionKey(piSession);
+	const state = sharedSessions.get(key);
+	if (!state) {
+		debug(`${event}: history rewritten, no session to mark yet`);
+	} else {
+		sharedSessions.set(key, { ...state, needsRebuild: true });
+		debug(`${event}: marking needsRebuild on session ${state.sessionId.slice(0, 8)}`);
+	}
+	// Arming parked contexts cannot wait for delivery: the entry checks
+	// `resultCtx.historyStale`, and a rewrite usually lands *while* the query is
+	// parked (compaction runs inside pi's turn loop, not between provider calls).
+	if (piSession) historyRewrittenBySession.add(piSession);
+	armStaleContexts();
+}
+
+/** Copy each armed session's mark onto the parked queries built from it. */
+function armStaleContexts(): void {
+	for (const c of activeQueryContexts) {
+		if (c.piSessionId && historyRewrittenBySession.has(c.piSessionId)) c.historyStale = true;
+	}
+}
+
+// This instance enlists. Session ids reaching any hook equal options.sessionId
+// on the serving instance's provider calls, so forwarding is safe: only the
+// owning instance's contexts and SessionState match the key.
+markRebuildHooks.add(markRebuildForSession);
+
+/** Event handlers call this: it fans the rewrite out to every module instance
+ *  in the process, of which exactly one is serving provider traffic for any
+ *  given pi session. */
+function sponsorMarkRebuildForSession(piSession: string | null, event: string): void {
+	for (const hook of markRebuildHooks) hook(piSession, event);
+}
 
 // Convert pi messages to Anthropic API format for session import.
 // Lossy: only text, thinking and toolCall blocks survive, and thinking only when
@@ -445,7 +538,7 @@ function describeRateLimitFailure(rejection: { rateLimitType?: string; resetsAt?
 }
 
 function isolatedStreamFn(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
-	const stream = newAssistantMessageEventStream();
+	const stream = createAssistantMessageEventStream();
 	void runIsolatedSummary(model, context, options, stream);
 	return stream;
 }
@@ -456,10 +549,10 @@ async function runIsolatedSummary(
 	options: SimpleStreamOptions | undefined,
 	stream: AssistantMessageEventStream,
 ): Promise<void> {
-	// pi 0.86 delivers compaction/branch-summary requests as a transcript: the summarization
-	// prompt folded into a leading system message ahead of the lone user message (issue #106).
-	// Recover the 0.85 shape so the extraction assertion below holds and the summarization
-	// prompt still reaches CC as its systemPrompt.
+	// pi delivers compaction/branch-summary requests as a transcript: the summarization
+	// prompt folded into a leading system message ahead of the lone user message
+	// (issue #106). toBridgeContext restores the prompt/tools fields the extraction
+	// assertion below assumes; the summarization prompt still reaches CC as its systemPrompt.
 	context = toBridgeContext(context);
 	let sdkQuery: ReturnType<typeof query> | undefined;
 	let wasAborted = false;
@@ -479,7 +572,8 @@ async function runIsolatedSummary(
 		const promptText = isOneOffSummary
 			? extractUserPrompt(context.messages)
 			: extractIsolatedSummaryPrompt(context.messages);
-		const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+		if (!promptText) throw new Error("runIsolatedSummary: one-off summary without a user prompt (last message is not user?)");
+		const cwd = process.cwd();
 		const compactProviderSettings = loadConfig(cwd).provider;
 		const claudeExecutable = compactProviderSettings?.pathToClaudeCodeExecutable;
 		const cliModel = claudeCodeModelId(model, longContextSettings);
@@ -655,15 +749,21 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 //
 // Log strings still say "Case 1/2/3/4" so existing diagnostics (int-cache.sh,
 // int-session-resume.mjs) keep grepping the same anchors.
-function syncSharedSession(
+	function syncSharedSession(
 	messages: Context["messages"],
 	cwd: string,
 	customToolNameToSdk?: Map<string, string>,
 	modelId?: string,
+	piSessionId?: string | null,
 ): SyncResult {
-	// System messages are pi 0.86's transcript representation of prompt and tool state, not
+	// System messages are pi's transcript representation of prompt and tool state, not
 	// conversation history — they are never imported into a CC session, so exclude them from
 	// the history space (priorMessages, cursor, missed) everywhere below (issue #106).
+	// The mirror this sync coordinates belongs to the syncing pi session alone:
+	// every read and write below addresses sessionStateFor(piSessionId), so a
+	// foreign session's shape-matching context can never REUSE or rebuild another
+	// session's CC file.
+	const sharedSession = sessionStateFor(piSessionId);
 	const history = nonSystemMessages(messages);
 	const priorMessages = history.slice(0, turnStart(history)); // everything before the current user turn
 
@@ -679,21 +779,25 @@ function syncSharedSession(
 		const trailingAssistantOnly =
 			missed.length === 1 && (missed[0] as { role?: string }).role === "assistant";
 		if (missed.length === 0 || trailingAssistantOnly) {
-			if (trailingAssistantOnly) {
-				sharedSession = { ...sharedSession, cursor: priorMessages.length, cwd };
-			}
-			debug(`Case 3: ${trailingAssistantOnly ? "advanced cursor past trailing assistant, " : ""}resuming session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
-			debug(`syncResult: path=reuse sessionId=${sharedSession.sessionId} cursor=${sharedSession.cursor}`);
-			return { sessionId: sharedSession.sessionId };
+		if (trailingAssistantOnly) {
+			setSessionStateFor(piSessionId, { ...sharedSession, cursor: priorMessages.length, cwd });
+			debug(`Case 3: advanced cursor past trailing assistant, resuming session ${sharedSession.sessionId.slice(0, 8)}, cursor=${priorMessages.length}`);
+		} else {
+			debug(`Case 3: resuming session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
+		}
+		debug(`syncResult: path=reuse sessionId=${sharedSession.sessionId} cursor=${sharedSession?.cursor}`);
+		return { sessionId: sharedSession.sessionId };
 		}
 	}
-	// This is what keeps a reentrant subagent from taking over the parent's
-	// session: a subagent starts with priors of its own, shorter than the parent's
-	// cursor, so it lands here, gets a fresh session, and the ephemeral session it
-	// captures is deleted once its query completes (see preserveSharedSession in
-	// the completion handler). Remove this branch and a subagent resumes — then
-	// overwrites — the parent's session. The non-isolated AskClaude path reaches it
-	// the same way.
+	// This is what keeps a caller with a pruned or short context from resuming
+	// — then overwriting — the bucket's session: shorter-than-cursor means the
+	// incoming history cannot be a continuation, so start clean and preserve.
+	// Historically this also caught reentrant subagents (a subagent's priors are
+	// shorter than the parent's cursor); with per-session mirrors it now catches
+	// the pruned-context shapes on a session's own bucket, and the non-isolated
+	// AskClaude path on the "(none)" bucket. The captured ephemeral session is
+	// deleted once its query completes (see preserveSharedSession in the
+	// completion handler).
 	//
 	// It is NOT, despite an earlier comment here, the isolated compact-summary
 	// path: runIsolatedSummary never calls syncSharedSession at all.
@@ -717,8 +821,8 @@ function syncSharedSession(
 	const previousCursor = sharedSession?.cursor ?? 0;
 	// preserveId: rebuild in place (deleteSession + createSession with the
 	// existing UUID), so prompt-cache UUIDs stay stable for log correlation
-	// and for any tools that key off them. Skipped only when there's a
-	// concurrent writer we shouldn't race — see forceRotate docs above.
+	// and for any tools that key off them. Skipped when there's a concurrent
+	// writer we shouldn't race (forceRotate).
 	const preserveId = previousSessionId !== undefined && !sharedSession?.forceRotate;
 	// Before deleteSession — it wipes the file these live in.
 	const carried = previousSessionId !== undefined ? readCarriedAttachments(previousSessionId, cwd) : [];
@@ -737,7 +841,7 @@ function syncSharedSession(
 	// records, not messages: `messages` filters out the attachment records that
 	// carrying an `@file` expansion across a rebuild writes into the same file.
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.records.length, cwd);
-	sharedSession = { sessionId: session.sessionId, cursor: priorMessages.length, cwd };
+	setSessionStateFor(piSessionId, { sessionId: session.sessionId, cursor: priorMessages.length, cwd, piSessionId: piSessionId ?? undefined });
 	if (previousSessionId === undefined) {
 		debug(`Case 2: first turn with ${priorMessages.length} prior messages → session ${session.sessionId.slice(0, 8)}, ${session.records.length} records`);
 	} else if (preserveId) {
@@ -751,16 +855,37 @@ function syncSharedSession(
 	return { sessionId: session.sessionId };
 }
 
+// The SDK's query(), or a test double (see setQuery). The compact/summary
+// path calls the real query() directly — its subprocess must never be swapped
+// out from under a real compaction.
+let queryImpl: typeof query = query;
+
 // @internal
 export const __test = {
-	resetSharedSession() {
-		sharedSession = null;
+	setQuery(fn: typeof query | null) {
+		queryImpl = fn ?? query;
 	},
-	setSharedSession(state: SessionState | null) {
-		sharedSession = state;
+	resetSharedSession(piSessionId?: string | null) {
+		// No id: full reset (the pre-map semantics — tests start from a blank slate).
+		if (piSessionId === undefined) sharedSessions.clear();
+		else setSessionStateFor(piSessionId, null);
+		historyRewrittenBySession.clear();
 	},
-	getSharedSession() {
-		return sharedSession;
+	markRebuildForSession,
+	getHistoryRewritten: () => historyRewrittenBySession.size > 0,
+	historyRewrittenBySession,
+	armStaleContexts,
+	discardRewrittenQuery,
+	contextForToolResults,
+	isQueryAbandoned: (q: object) => abandonedQueries.has(q),
+	get activeQueryContexts() {
+		return activeQueryContexts;
+	},
+	setSharedSession(piSessionId: string | null, state: SessionState | null) {
+		setSessionStateFor(piSessionId, state);
+	},
+	getSharedSession(piSessionId: string | null = null) {
+		return sessionStateFor(piSessionId);
 	},
 	setPiUI(ui: ExtensionUIContext | null) {
 		piUI = ui;
@@ -773,10 +898,6 @@ export const __test = {
 	resultErrorText,
 	deliverToolResults,
 	drainForAbort,
-	discardSupersededQuery,
-	get activeQueryContexts() {
-		return activeQueryContexts;
-	},
 	CC_CHILD_ENV,
 	buildMcpServers,
 	branchSummaryOutcome,
@@ -992,19 +1113,11 @@ function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, 
 
 // --- Usage helpers ---
 
-function updateUsage(output: AssistantMessage, usage: Record<string, number | undefined>, model: Model<any>): void {
-	if (usage.input_tokens != null) output.usage.input = usage.input_tokens;
-	if (usage.output_tokens != null) output.usage.output = usage.output_tokens;
-	if (usage.cache_read_input_tokens != null) output.usage.cacheRead = usage.cache_read_input_tokens;
-	if (usage.cache_creation_input_tokens != null) output.usage.cacheWrite = usage.cache_creation_input_tokens;
-	// Claude Code may report reasoning/thinking tokens separately, while pi's Usage type does not model that field.
-	const reasoning = usage.reasoning_tokens ?? usage.thinking_tokens;
-	if (reasoning != null) (output.usage as typeof output.usage & { reasoning?: number }).reasoning = reasoning;
-	output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
-	calculateCost(model, output.usage);
-	const promptTokens = output.usage.input + output.usage.cacheRead + output.usage.cacheWrite;
-	const cachePct = promptTokens > 0 ? Math.round(output.usage.cacheRead / promptTokens * 100) : 0;
-	const reasoningText = reasoning != null ? ` reasoning=${reasoning}` : "";
+// The counter mapping lives in usage.ts; the debug line is this side's job, so every
+// call site logs the same way rather than three times over.
+function recordUsage(output: AssistantMessage, usage: SdkUsage, model: Model<any>): void {
+	const { cachePct, reasoning } = updateUsage(output, usage, model);
+	const reasoningText = reasoning == null ? "" : ` reasoning=${reasoning}`;
 	debug(`usage: in=${output.usage.input} out=${output.usage.output} cacheRead=${output.usage.cacheRead} cacheWrite=${output.usage.cacheWrite} total=${output.usage.totalTokens}${reasoningText} cachePct=${cachePct}% model=${model.id}`);
 }
 
@@ -1028,6 +1141,8 @@ function logServedContextWindow(label: string, message: SDKMessage, model: Model
 const REASONING_TO_EFFORT: Record<string, EffortLevel> = {
 	minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max",
 };
+
+const VALID_EFFORTS = new Set<string>(["low", "medium", "high", "xhigh", "max"]);
 
 // --- Provider helpers: misc ---
 
@@ -1109,8 +1224,14 @@ function processStreamEvent(
 	const event = (message as SDKMessage & { event: any }).event;
 
 	if (event?.type === "message_start") {
+		// Still open from an earlier message_start: Claude Code gave up on that
+		// stream and is retrying it. Its blocks were never completed.
+		if (c.turnStreamOpen) dropAbandonedStreamBlocks(c, `restreamed as ${event.message?.id}`);
 		c.turnToolCallIds = [];
-		if (event.message?.usage) updateUsage(c.turnOutput, event.message.usage, model);
+		c.turnStreamMessageId = event.message?.id;
+		c.turnStreamOpen = true;
+		c.turnStreamBlockStart = c.turnBlocks.length;
+		if (event.message?.usage) recordUsage(c.turnOutput, event.message.usage, model);
 		return;
 	}
 
@@ -1187,9 +1308,11 @@ function processStreamEvent(
 
 	if (event?.type === "message_delta") {
 		c.turnOutput.stopReason = mapStopReason(event.delta?.stop_reason);
-		if (event.usage) updateUsage(c.turnOutput, event.usage, model);
+		if (event.usage) recordUsage(c.turnOutput, event.usage, model);
 		return;
 	}
+
+	if (event?.type === "message_stop") c.turnStreamOpen = false;
 
 	if (event?.type === "message_stop" && c.turnSawToolCall) {
 		// Tool call complete — end this pi stream. The SDK will still yield an
@@ -1213,16 +1336,46 @@ function processStreamEvent(
 	}
 }
 
+/** Remove the blocks a stream Claude Code abandoned mid-message. They never got a
+ *  message_stop, so a thinking block has no signature and a tool call is one CC will
+ *  never dispatch; left in, pi would run the tool and the turn would wait on a
+ *  handler that never comes, or the next request would replay a broken block.
+ *  The fallback then restarts those indices. pi's normal provider path tolerates that;
+ *  pi-agent-core's experimental harness frame encoder keys blocks by contentIndex and
+ *  rejects a repeated start, so it would need a change there to drive this provider. */
+function dropAbandonedStreamBlocks(c: QueryContext, why: string): void {
+	const dropped = c.turnBlocks.splice(c.turnStreamBlockStart);
+	debug(`dropAbandonedStreamBlocks: ${why}; dropped ${dropped.length} blocks from ${c.turnStreamMessageId} types=${dropped.map((b: any) => b.type).join(",")}`);
+	c.turnToolCallIds = [];
+	c.turnSawToolCall = c.turnBlocks.some((b: any) => b.type === "toolCall");
+	c.turnStreamOpen = false;
+}
+
 // The SDK always yields `assistant` messages (completed content blocks) after streaming.
 // When stream_events already delivered the content, this is a no-op. But after
 // resetTurnState (e.g. tool result delivery), if the next turn's assistant message
 // arrives before any stream_events, this is the primary content path. Must maintain
 // the same stream lifecycle as processStreamEvent — including ending the stream on
 // tool_use to prevent deadlock with the MCP handler.
+//
+// It is also the content path when a stream stalls: Claude Code drops it and asks
+// again without streaming ("Error streaming, falling back to non-streaming mode"),
+// and the answer arrives as one assistant message, under a new message id, with no
+// stream_events of its own. turnSawStreamEvent is already set by the dead stream,
+// so gating on it alone dropped that message: its tool calls never reached pi, CC
+// sat in the MCP handler waiting for their results, and the turn hung on "Working"
+// until the user aborted it.
 function processAssistantMessage(message: SDKMessage, model: Model<any>, customToolNameToPi: Map<string, string>, c: QueryContext): void {
-	if (c.turnSawStreamEvent) return;
 	const assistantMsg = (message as any).message;
 	if (!assistantMsg?.content) return;
+	if (c.turnSawStreamEvent) {
+		// Same id was already delivered; a new id is CC's non-streaming fallback.
+		// Drop the stalled stream's partial blocks if it never stopped. Deliberately
+		// deliver even if it stopped, at the risk of duplication if CC renumbers it.
+		const id = assistantMsg.id;
+		if (!id || !c.turnStreamMessageId || id === c.turnStreamMessageId) return;
+		if (c.turnStreamOpen) dropAbandonedStreamBlocks(c, `non-streaming fallback ${id}`);
+	}
 	c.turnToolCallIds = [];
 	debug(`processAssistantMessage fallback: ${assistantMsg.content.length} blocks, types=${assistantMsg.content.map((b: any) => b.type).join(",")}`);
 	for (const block of assistantMsg.content) {
@@ -1262,7 +1415,7 @@ function processAssistantMessage(message: SDKMessage, model: Model<any>, customT
 			debug("processAssistantMessage: unhandled block type", block.type);
 		}
 	}
-	if (assistantMsg.usage && c.turnOutput) updateUsage(c.turnOutput, assistantMsg.usage, model);
+	if (assistantMsg.usage && c.turnOutput) recordUsage(c.turnOutput, assistantMsg.usage, model);
 
 	// End the stream on tool_use, same as processStreamEvent's message_stop handler.
 	if (c.turnSawToolCall && c.currentPiStream && c.turnOutput) {
@@ -1416,10 +1569,11 @@ function steerBlocks(messages: Context["messages"]): ContentBlockParam[] | null 
 /** A steer that never made it into CC's session. The cursor has already counted
  *  it, so count-based sync would skip it forever — rebuild instead, which
  *  re-imports the message from pi's context. */
-function steerMissedSession(text: string): void {
-	if (!sharedSession) return;
-	sharedSession = { ...sharedSession, needsRebuild: true };
-	debug(`provider: steer never reached CC, marked session for rebuild: ${text.slice(0, 60)}`);
+function steerMissedSession(c: QueryContext, text: string): void {
+	c.missedSteer = true;
+	const state = sessionStateFor(c.piSessionId);
+	if (state) setSessionStateFor(c.piSessionId, { ...state, needsRebuild: true });
+	debug(`provider: steer never reached CC, marked query for rebuild: ${text.slice(0, 60)}`);
 }
 
 /** Releases this turn's tool results to their MCP handlers, after first pushing
@@ -1445,7 +1599,7 @@ async function deliverToolResults(
 		const text = steer.map((b) => (b.type === "text" ? b.text : "[image]")).join("\n");
 		if (!c.promptStream) {
 			debug(`WARNING: steer with no prompt stream, dropping: ${text.slice(0, 60)}`);
-			steerMissedSession(text);
+			steerMissedSession(c, text);
 		} else {
 			try {
 				await c.promptStream.push(userMessage(steer, "next"));
@@ -1456,7 +1610,7 @@ async function deliverToolResults(
 				// pi's context, and the caller has already advanced the session
 				// cursor past it, so force a rebuild or CC would never see it.
 				debug(`provider: steer push rejected, delivering tool result anyway:`, error);
-				steerMissedSession(text);
+				steerMissedSession(c, text);
 			}
 		}
 	}
@@ -1494,49 +1648,104 @@ function drainForAbort(c: QueryContext, promptStream: PromptStream): void {
 	c.releasePendingToolCalls("Operation aborted");
 }
 
-// Rebuilding under the old session id would race the dying subprocess's last
-// writes into the new file, so the rebuild rotates, as it does after an abort.
-function discardSupersededQuery(c: QueryContext): void {
-	c.superseded = true;
-	activeQueryContexts.delete(c);
-	const sdkQuery = c.activeQuery;
-	c.activeQuery = null;
-	if (c === ctx()) resetCtx();
-	if (sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
-	debug(`provider: pi rewrote the conversation under a parked query, discarding it (generation ${c.historyGeneration} → ${historyGeneration})`);
-	// Interrupt, and only then close: close() fails the parked tool call, and Claude
-	// Code sends that failure on to the model with the whole old context.
-	void sdkQuery?.interrupt()
-		.catch(() => {})
-		.finally(() => {
-			try { sdkQuery.close(); } catch {}
-		});
-}
+/** Queries pi's history moved out from under. Their completion must not touch
+ *  `sharedSession` or the pi stream: the query that took over the turn has
+ *  already rebuilt both from the new history, and this one's session id names the
+ *  conversation pi just discarded. */
+const abandonedQueries = new WeakSet<object>();
 
-const RESUME_AFTER_TOOL_RESULT = "Continue from where you left off.";
+/** The prompt a continuation query is opened with: the pi turn goes on, but its
+ *  last message is a tool result rather than a prompt, and query() cannot resume
+ *  a session without one. */
+const CONTINUE_AFTER_REWRITE_PROMPT =
+	"[Your context was compacted. What precedes this is a summary plus the most recent messages, "
+	+ "ending with the tool result you were waiting for. Continue the task from there.]";
+
+/** Drop a Claude Code query parked at a tool boundary whose conversation pi has
+ *  since rewritten (/compact, tree navigation).
+ *
+ *  Delivering the turn's tool result into that query hands Claude Code the
+ *  context pi just shrank: one pi turn is one CC query, and the query keeps its
+ *  own context inside the CLI whatever pi does to its transcript. It answers off
+ *  the pre-compaction conversation, reports the pre-compaction usage back, and pi
+ *  crosses the same threshold at the next boundary — measured as one compaction
+ *  per tool call with usage never dropping (issue #101). `needsRebuild` does not
+ *  prevent it: only syncSharedSession reads that flag, and tool-result delivery
+ *  is the one call that never syncs.
+ *
+ *  The caller then takes the fresh-query path, where REBUILD imports pi's
+ *  rewritten history — this tool result included, since it is already in that
+ *  history — so the turn continues instead of ending here. Nothing is lost by
+ *  killing the subprocess: pi owns the only copy of the conversation that counts. */
+function discardRewrittenQuery(c: QueryContext): void {
+	const discarded = c.activeQuery as { interrupt?: () => Promise<unknown>; close?: () => void } | null;
+	if (discarded) abandonedQueries.add(discarded);
+	c.activeQuery = null;
+	// Leaving the routing set is what stops this result coming straight back here:
+	// contextForToolResults only matches ids against contexts still in it.
+	activeQueryContexts.delete(c);
+	c.turnToolCallIds = [];
+	c.promptStream?.fail(new Error("conversation rewritten"));
+	c.promptStream = null;
+	// Settle the parked handlers before killing the CLI, for drainForAbort's
+	// reason: one left awaiting a dead subprocess never settles.
+	c.releasePendingToolCalls("Context was compacted; this query was discarded.");
+	void discarded?.interrupt?.().catch(() => {});
+	try { discarded?.close?.(); } catch {}
+	// The CLI we just killed may still flush a record into the session JSONL, and
+	// the rebuild is the next thing that happens — so rotate rather than race it,
+	// exactly as after an abort. Only this session's mirror: the discarding query
+	// proves its own conversation is the one being rebuilt around.
+	const state = sessionStateFor(c.piSessionId);
+	if (state) setSessionStateFor(c.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
+	if (c.piSessionId) historyRewrittenBySession.delete(c.piSessionId);
+	debug("provider: history rewritten under a parked query — discarded it, rebuilding from current history");
+}
 
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	showStartupNoticeOnce();
-	// pi 0.86 hands providers a transcript (prompt/tools folded into system messages) —
-	// translate to the 0.85-shaped Context every cursor write, syncSharedSession call and
-	// prompt-capture lookup below assumes (issue #106). A 0.85 host passes through unchanged.
+	// pi hands providers a transcript (prompt/tools folded into system messages) — fold it
+	// back out to the prompt/tools fields every cursor write, syncSharedSession call and
+	// prompt-capture lookup below assumes (issue #106).
 	context = toBridgeContext(context);
-	const stream = newAssistantMessageEventStream();
+
+	// One-off summarizer calls arrive HERE too, not only via isolatedStreamFn: /bug report
+	// (summarizeForBugReport) routes through agent.streamFunction -> streamSimple, with no
+	// takeover hook. pi marks every one-off summarizer with cacheRetention:"none" in
+	// completeSummarization, so route on the marker: their prompt is never recorded by the
+	// capture boundaries and resolveOrDerive would throw. Hand them to the isolated path
+	// (separate persistSession:false CC process, no session sync needed).
+	if (options?.cacheRetention === "none") {
+		debug(`provider: one-off summarizer call (cacheRetention none) routed to isolated summary, msgs=${context.messages.length}`);
+		return isolatedStreamFn(model, context, options);
+	}
+
+	const stream = createAssistantMessageEventStream();
 
 	// DEBUG: trace followUp message triggering
 	const lastMsgRole = context.messages[context.messages.length - 1]?.role;
 	debug(`provider: streamClaudeAgentSdk called, activeQuery=${!!ctx().activeQuery}, lastMsgRole=${lastMsgRole}, isReentrant=${ctx().activeQuery !== null}`);
 
+	let activeQuery = ctx().activeQuery !== null;
 	const allResults = activeQueryContexts.size > 0 ? extractAllToolResults(context) : [];
-	const ownerCtx = allResults.length > 0 ? contextForToolResults(allResults) : undefined;
-	// A compaction that fires mid-reply leaves the query that asked for these results
-	// parked on a conversation pi has replaced. Delivering into it continues that one.
-	const supersededCtx = ownerCtx === ctx() && ownerCtx.historyGeneration !== historyGeneration ? ownerCtx : undefined;
-	if (supersededCtx) discardSupersededQuery(supersededCtx);
-	const resultCtx = supersededCtx ? undefined : ownerCtx;
-	const activeQuery = ctx().activeQuery !== null;
+	let resultCtx = allResults.length > 0 ? contextForToolResults(allResults) : undefined;
+
+	// pi rewrote its history while this query sat parked at a tool boundary, so the
+	// query answers about a conversation that no longer exists. Discard it and let
+	// this tool result carry the turn into a fresh query over the rewritten history.
+	// The staleness mark is per pi session: a subagent's compaction (its own
+	// AgentSession, sharing this process) must not discard the parent's parked
+	// query, and vice versa.
+	const rewrittenUnderQuery = Boolean(resultCtx?.historyStale);
+	if (resultCtx && rewrittenUnderQuery) {
+		discardRewrittenQuery(resultCtx);
+		resultCtx = undefined;
+		// Recomputed, not cleared: a reentrant subagent may still hold a query of its own.
+		activeQuery = ctx().activeQuery !== null;
+	}
+
 	const isReentrantUserQuery = activeQuery && lastMsgRole === "user" && allResults.length === 0;
 	if (isReentrantUserQuery) {
 		debug(`provider: active query user-only call treated as reentrant fresh query, waitingHandlers=${ctx().pendingToolCalls.size}, ctx.msgs=${context.messages.length}`);
@@ -1549,6 +1758,11 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	if (resultCtx) {
 		claimCurrentPiStream(stream, "tool-result", resultCtx);
 		resultCtx.resetTurnState(model);
+		// A rewrite that armed the mark after this query parked gets copied here,
+		// though markRebuildForSession usually reaches it directly.
+		if (!resultCtx.historyStale && resultCtx.piSessionId && historyRewrittenBySession.has(resultCtx.piSessionId)) {
+			resultCtx.historyStale = true;
+		}
 		// User messages (steer/followUp) pi injected into context during the
 		// active query: a steer sent while a tool was executing, drained by pi at
 		// the turn boundary and appended alongside the tool result.
@@ -1561,18 +1775,26 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// delivering its own results would drag it to that subagent's message count
 		// — observed pulling a parent from 5 back to 3, which cost the parent's next
 		// turn a full rebuild and a flushed prompt cache.
-		if (sharedSession && resultCtx === ctx()) sharedSession.cursor = context.messages.length;
+		const state = sessionStateFor(resultCtx.piSessionId);
+		if (state) state.cursor = context.messages.length;
 		resultCtx.latestCursor = Math.max(resultCtx.latestCursor, context.messages.length);
 		return stream;
 	}
 
 	// --- Orphaned tool result (e.g. user aborted a tool call) ---
 	// The query is gone but pi still delivered the result. Nothing to do — just
-	// emit end_turn so pi waits for the next real user message.
+	// emit end_turn so pi waits for the next real user message. The discard
+	// branch above already siphoned off the stale-query case, which goes on to a
+	// rebuild instead — that one has somewhere to deliver the result to.
 	const lastMsg = context.messages[context.messages.length - 1];
-	if (lastMsg?.role === "toolResult" && !supersededCtx) {
+	if (lastMsg?.role === "toolResult" && !rewrittenUnderQuery) {
 		debug(`provider: orphaned tool result after abort, emitting end_turn`);
-		if (sharedSession && activeQueryContexts.size === 0) sharedSession.cursor = context.messages.length;
+		// With no query in flight anywhere, the top-level session this result
+		// belongs to is the one whose turn just ended: its cursor advances to
+		// count the result (options.sessionId is that session — pi emits the
+		// result event through the same session's streamSimple call).
+		const orphanState = sessionStateFor(options?.sessionId ?? null);
+		if (orphanState && activeQueryContexts.size === 0) orphanState.cursor = context.messages.length;
 		// No query owns this result, so there is no context to reset: resetTurnState
 		// on the top-level ctx() would replace a live parent's turnOutput mid-stream,
 		// stranding the blocks it had already emitted. A throwaway context just
@@ -1595,9 +1817,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const queryCtx = isReentrant ? new QueryContext() : ctx();
 	debug(`provider: fresh query setup, isReentrant=${isReentrant}, activeContexts=${activeQueryContexts.size}`);
 
-	// Resolved first: an unaccountable system prompt throws, and doing that before
-	// anything is claimed or reset leaves no half-built query behind — in particular
-	// no stream claimed on the shared context that nobody will ever end.
+	// Resolved first: an unaccountable system prompt fails this query before anything
+	// is claimed or reset, leaving no half-built query behind — in particular no stream
+	// claimed on the shared context that nobody will ever end.
 	const { mcpTools, customToolNameToSdk, customToolNameToPi } = resolveMcpTools(context, askClaudeToolName);
 	// Build from what Pi loaded for this run, so `--no-context-files` and
 	// `--no-skills` reach Claude Code by leaving nothing to forward. A sub-agent's
@@ -1606,12 +1828,34 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// Derive the key from the transcript replay (toBridgeContext), NOT from the
 	// recorded keys: under a forced prompt the transcript head is projected via
 	// transformContext after turn_start, so ctx.getSystemPrompt() is not the head.
-	const promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
-	const systemPromptAppend = promptCapture
-		? projectPromptCapture(promptCapture, {
-			skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
-		})
-		: undefined;
+	let promptCapture: PromptCapture | undefined;
+	let systemPromptAppend: string | undefined;
+	try {
+		promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
+		systemPromptAppend = promptCapture
+			? projectPromptCapture(promptCapture, {
+				skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
+			})
+			: undefined;
+	} catch (err) {
+		// resolveOrDerive and projectPromptCapture throw to stop a turn that would lose
+		// its instructions or leak pi's harness text. Report it on the stream, as pi-ai's
+		// provider contract expects, so any caller — not only pi's agent loop, which
+		// catches a throw — sees a failed turn rather than a synchronous exception.
+		const output = newAssistantOutput(model, "", "error", errorMessage(err));
+		queueMicrotask(() => {
+			stream.push({ type: "error", reason: "error", error: output });
+			markStreamComplete(stream);
+			stream.end();
+		});
+		diagDump("prompt_capture_unresolved", {
+			promptChars: context.systemPrompt?.length ?? 0,
+			knownKeys: promptCaptures.size,
+			reentrantUserQuery: isReentrantUserQuery,
+			error: errorMessage(err),
+		});
+		return stream;
+	}
 
 	// 2. Fresh child context — constructor already gave us clean Maps and empty
 	//    arrays. For a reused top-level context, clear explicitly.
@@ -1624,16 +1868,40 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.turnToolCallIds = [];
 	queryCtx.resetTurnState(model);
 	queryCtx.latestCursor = 0;
-	queryCtx.historyGeneration = historyGeneration;
+	// The served pi session, for rewrite attribution on delivery (issue #101
+	// follow-up) and on SessionState. A fresh instance of this module inside a
+	// worktree-spawned subagent has its own contexts; each records its own.
+	queryCtx.piSessionId = options?.sessionId ?? null;
+	// A discarded query's replacement reuses this context; without the reset its
+	// first tool result would sit on armed staleness again (the mark is consumed
+	// from the set, not from here) and re-discard a healthy query.
+	queryCtx.historyStale = false;
+	queryCtx.missedSteer = false;
 
-	const cwd = (options as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+	const cwd = process.cwd();
 	// cliModel is the actual id sent to Claude Code (may carry [1m]); model.id is the
 	// pi-registered id. Log cliModel so debug lines reflect what CC actually received.
 	const cliModel = claudeCodeModelId(model, longContextSettings);
-	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel);
+	// Which pi session this query serves — the attribution key for history
+	// rewrites (session_compact / session_tree) and for SessionState above.
+	const piSessionId = options?.sessionId ?? null;
+	const syncResult = syncSharedSession(context.messages, cwd, customToolNameToSdk, cliModel, piSessionId);
+	// This query starts from the history pi has now: consume this session's
+	// armed rewrite — a sibling pi session's stays armed for its own queries.
+	if (piSessionId) historyRewrittenBySession.delete(piSessionId);
 	const { sessionId: resumeSessionId } = syncResult;
 	const promptBlocks = extractUserPromptBlocks(context.messages);
-	let promptText = extractUserPrompt(context.messages) ?? (supersededCtx ? RESUME_AFTER_TOOL_RESULT : "");
+	let promptText = extractUserPrompt(context.messages) ?? "";
+
+	// A turn continuing past a discarded query ends at its tool result, not at a
+	// prompt, so say what happened rather than falling into the empty-prompt
+	// recovery below — that one is for a shape we do not expect, and this is one
+	// we do. The rebuilt session already ends with the tool result, placed after
+	// the tool call it answers.
+	if (rewrittenUnderQuery && !promptText && !promptBlocks) {
+		promptText = CONTINUE_AFTER_REWRITE_PROMPT;
+		debug(`provider: continuing the turn after a rewritten history, ${context.messages.length} msgs rebuilt`);
+	}
 
 	// Guard: empty prompt means the last context message isn't a user message.
 	// This should never happen with per-query state — dump diagnostics if it does.
@@ -1644,7 +1912,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			isReentrant,
 			activeQueryContexts: activeQueryContexts.size,
 			activeQueryExists: queryCtx.activeQuery !== null,
-			sharedSession: sharedSession ? { sessionId: sharedSession.sessionId.slice(0, 8), cursor: sharedSession.cursor } : null,
+			sharedSession: sessionStateFor(piSessionId) ? { sessionId: sessionStateFor(piSessionId)!.sessionId.slice(0, 8), cursor: sessionStateFor(piSessionId)!.cursor } : (sessionStateFor(null) ? { sessionId: sessionStateFor(null)!.sessionId.slice(0, 8), cursor: sessionStateFor(null)!.cursor } : null),
 			messageRoles: context.messages.map((m, i) => `[${i}]${m.role}`).join(" "),
 		});
 		// Recover: use a continuation prompt so the SDK doesn't send an empty text block
@@ -1670,12 +1938,19 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const strictMcpConfigEnabled = providerSettings.strictMcpConfig !== false;
 	const claudeExecutable = providerSettings.pathToClaudeCodeExecutable;
 
-	// Prefer the model's own thinkingLevelMap when present (pi-ai 0.72+ ships
-	// per-model overrides — e.g. opus-4-7 wants xhigh→xhigh, not xhigh→max).
-	// Fall back to our generic table for older pi-ai or unmapped levels.
+	// Prefer the model's own thinkingLevelMap (per-model overrides — e.g. a map can
+	// route xhigh→xhigh where the generic table maps xhigh→max). pi-ai's catalog
+	// ships a map for most Claude models; the table below covers models without
+	// one, and the levels a map leaves unnamed. A null entry means the level is
+	// unsupported on that model: no effort argument is sent, so Claude Code's own
+	// default applies rather than the generic table's value. Map values are
+	// provider-generic strings, so a map value is trusted only when it names a
+	// level CC accepts.
+	const mapped = options?.reasoning ? model.thinkingLevelMap?.[options.reasoning] : undefined;
 	const effort = options?.reasoning
-		? ((model as any).thinkingLevelMap?.[options.reasoning] as EffortLevel | undefined)
-			?? REASONING_TO_EFFORT[options.reasoning]
+		? mapped === undefined
+			? REASONING_TO_EFFORT[options.reasoning]
+			: VALID_EFFORTS.has(mapped as EffortLevel) ? mapped as EffortLevel : undefined
 		: undefined;
 
 	const extraArgs: Record<string, string | null> = { model: cliModel };
@@ -1735,7 +2010,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 
 	// 3. Start SDK query and claim it for this context
 	let wasAborted = false;
-	const sdkQuery = query({ prompt: promptStream.stream, options: queryOptions });
+	const sdkQuery = queryImpl({ prompt: promptStream.stream, options: queryOptions });
 	queryCtx.activeQuery = sdkQuery;
 	activeQueryContexts.add(queryCtx);
 
@@ -1761,12 +2036,22 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// Background consumer — runs until query ends
 	consumeQuery(sdkQuery, customToolNameToPi, model, () => wasAborted, queryCtx)
 		.then(async ({ capturedSessionId }) => {
-			debug(`provider: consumeQuery completed, stopReason=${queryCtx.turnOutput?.stopReason}, error=${queryCtx.turnOutput?.errorMessage}, aborted=${wasAborted}, superseded=${queryCtx.superseded}`);
-			if (queryCtx.superseded) return;
+			debug(`provider: consumeQuery completed, stopReason=${queryCtx.turnOutput?.stopReason}, error=${queryCtx.turnOutput?.errorMessage}, aborted=${wasAborted}`);
+
+			// Discarded out from under: the query continuing the turn owns the context,
+			// the session and the stream. Capturing this one's session id here would put
+			// Claude Code back on the conversation it was discarded for.
+			if (abandonedQueries.has(sdkQuery)) {
+				debug("provider: discarded query completed, leaving session and stream to its replacement");
+				return;
+			}
 
 			// --- Abort detection in normal completion path ---
 			if (wasAborted || options?.signal?.aborted) {
-				if (sharedSession) sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+				// The killed subprocess may flush a late record into this session's
+				// JSONL — its own mirror's next sync must rebuild and rotate.
+				const state = sessionStateFor(queryCtx.piSessionId);
+				if (state) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
 				debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
 				if (queryCtx.turnOutput) {
 					queryCtx.turnOutput.stopReason = "aborted";
@@ -1781,18 +2066,25 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			}
 
 			// --- Capture session ID ---
-			const sessionId = capturedSessionId ?? sharedSession?.sessionId;
+			// This query's own mirror — a reentrant subagent completing does not
+			// reassign the parent's conversation to the child's CC file.
 			if (syncResult.preserveSharedSession) {
-				if (capturedSessionId && capturedSessionId !== sharedSession?.sessionId) {
+				const state = sessionStateFor(queryCtx.piSessionId);
+				if (capturedSessionId && capturedSessionId !== state?.sessionId) {
 					deleteSession(capturedSessionId, cwd, process.env.CLAUDE_CONFIG_DIR);
 					debug(`provider: query done, deleted ephemeral session ${capturedSessionId.slice(0, 8)} to preserve shared session`);
 				}
 				debug(`provider: query done, ignoring captured session ${capturedSessionId?.slice(0, 8) ?? "none"} to preserve shared session`);
-			} else if (sessionId) {
-				const cursor = Math.max(context.messages.length, queryCtx.latestCursor, sharedSession?.cursor ?? 0);
-				const rewrittenSinceSync = queryCtx.historyGeneration !== historyGeneration;
-				debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}${rewrittenSinceSync ? ", history rewritten since sync, keeping needsRebuild" : ""}`);
-				sharedSession = { sessionId, cursor, cwd, ...(rewrittenSinceSync ? { needsRebuild: true } : {}) };
+			} else {
+				const state = sessionStateFor(queryCtx.piSessionId);
+				const sessionId = capturedSessionId ?? state?.sessionId;
+				if (sessionId) {
+					const cursor = Math.max(context.messages.length, queryCtx.latestCursor, state?.cursor ?? 0);
+					debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
+					// A missed steer may precede the first mirror or arrive while this
+					// query is still able to complete. Preserve both rebuild signals.
+					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild });
+				}
 			}
 
 			if (!isReentrant && queryCtx.activeQuery === sdkQuery) {
@@ -1802,12 +2094,19 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			finalizeCurrentStream(queryCtx, queryCtx.turnOutput?.stopReason);
 		})
 		.catch((error) => {
-			debug(`provider: query error, model=${cliModel}, aborted=${Boolean(options?.signal?.aborted)}, superseded=${queryCtx.superseded}, error=`, error);
-			if (queryCtx.superseded) return;
-			if ((wasAborted || options?.signal?.aborted) && sharedSession) {
-				sharedSession = { ...sharedSession, needsRebuild: true, forceRotate: true };
+			debug(`provider: query error, model=${cliModel}, aborted=${Boolean(options?.signal?.aborted)}, error=`, error);
+			if (abandonedQueries.has(sdkQuery)) {
+				debug("provider: discarded query ended in error, leaving session and stream to its replacement");
+				return;
+			}
+			if ((wasAborted || options?.signal?.aborted)) {
+				const state = sessionStateFor(queryCtx.piSessionId);
+				if (state) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
 			} else {
-				sharedSession = null;
+				// Drop this session's mirror: its conversation is in an unknown
+				// state after the error. Other sessions' mirrors stay — one
+				// session's failure says nothing about another's conversation.
+				setSessionStateFor(queryCtx.piSessionId, null);
 			}
 			promptStream.fail(error instanceof Error ? error : new Error(String(error)));
 			if (queryCtx.turnOutput) {
@@ -1866,6 +2165,9 @@ async function promptAndWait(
 		thinking?: string;
 		isolated?: boolean;
 		context?: Context["messages"];
+		/** pi session the calling tool ran in — AskClaude's conversation continues
+	 *  the session that called it, so its sync and capture key that mirror. */
+		piSessionId?: string | null;
 	},
 ): Promise<{ responseText: string; stopReason: string }> {
 	const cwd = process.cwd();
@@ -1876,24 +2178,29 @@ async function promptAndWait(
 
 	// Session resume for shared mode — reuse provider's session if it exists,
 	// otherwise create one from pi's context.
-	// Note: doesn't update sharedSession.cursor after completion, so the next
+	// Note: doesn't update the mirror's cursor after completion, so the next
 	// provider call will see missed messages and trigger a Case 4 rebuild.
+	// AskClaude has a random-origin context handed to it, but the session it
+	// belongs to is the one whose tool ran — the extension API's execute ctx
+	// carries it — passed here as piSessionId and used for every map access.
+	const askClaudeSessionId = options?.piSessionId ?? null;
 	let resumeSessionId: string | null = null;
 	if (!options?.isolated && options?.context?.length) {
-		if (sharedSession) {
+		const askClaudeState = sessionStateFor(askClaudeSessionId);
+		if (askClaudeState) {
 			// Provider already has a session — just resume from it
 			// Any missed messages from other providers were already handled by the provider's Case 4
-			resumeSessionId = sharedSession.sessionId;
+			resumeSessionId = askClaudeState.sessionId;
 		} else {
 			// No provider session yet — create one from pi's context
 			const contextWithPrompt = [...options.context, { role: "user" as const, content: prompt, timestamp: Date.now() }];
-			const sync = syncSharedSession(contextWithPrompt as Context["messages"], cwd, undefined, cliModel);
+			const sync = syncSharedSession(contextWithPrompt as Context["messages"], cwd, undefined, cliModel, askClaudeSessionId);
 			resumeSessionId = sync.sessionId;
 		}
 	}
 
 	// Mode → disallowed tools
-	const disallowedTools = MODE_DISALLOWED_TOOLS[mode] ?? [];
+	const disallowedTools = MODE_DISALLOWED_TOOLS[mode];
 
 	// AskClaude uses Claude Code's native Read tool rather than Pi's MCP bridge.
 	// Same resolver as the provider path: a prompt neither recorded nor derivable
@@ -2040,9 +2347,6 @@ async function promptAndWait(
 
 // --- Extension registration ---
 
-const DEFAULT_TOOL_DESCRIPTION_FULL = "Delegate to Claude Code for a second opinion or analysis (code review, architecture questions, debugging theories), or to autonomously handle a task. Defaults to read-only mode — use full mode when the user wants to delegate a task that requires changes. Prefer to handle straightforward tasks yourself.";
-const DEFAULT_TOOL_DESCRIPTION = "Delegate to Claude Code for a second opinion or analysis (code review, architecture questions, debugging theories). Read-only — Claude Code can explore the codebase but not make changes. Prefer to handle straightforward tasks yourself.";
-
 const PREVIEW_MAX_CHARS = 1000;
 const PREVIEW_MAX_LINES = 6;
 
@@ -2068,7 +2372,7 @@ export default function (pi: ExtensionAPI) {
 	};
 	const registeredModels = applyLongContext(MODELS, longContextSettings);
 	if (registeredModels.length === 0) {
-		console.error("claude-bridge: no models available from pi-ai's anthropic catalog — update @earendil-works/pi-ai (requires >=0.85.0)");
+		console.error("claude-bridge: no models available from pi-ai's anthropic catalog — update @earendil-works/pi-ai (requires >=0.86.1)");
 	}
 
 	if (!config.startupNoticeShown) {
@@ -2078,8 +2382,12 @@ export default function (pi: ExtensionAPI) {
 
 	// Reset shared session on pi session lifecycle events
 	const clearSession = (event: string) => {
-		debug(`${event}: clearing session ${sharedSession?.sessionId?.slice(0, 8) ?? "none"}`);
-		sharedSession = null;
+		debug(`${event}: clearing ${sharedSessions.size} shared session${sharedSessions.size === 1 ? "" : "s"}`);
+		// Whole map: children never emit session_shutdown (only runtime teardown
+		// and /reload do), so there is no per-entry removal to do here — the
+		// top-level transition takes every mirror with it.
+		sharedSessions.clear();
+		historyRewrittenBySession.clear();
 
 		// Clear the global streamSimple if this instance registered it.
 		// This allows /reload to work — the old instance clears the flag so
@@ -2101,7 +2409,7 @@ export default function (pi: ExtensionAPI) {
 	// Code's preset carries its own tool and permission guidance that the bridge
 	// still depends on, so both flags are forwarded as an append.
 	//
-	// The options (custom/append/contextFiles/skills) are pi config, stable across a
+	// The options (custom/append/contextFiles/skills/sections) are pi config, stable across a
 	// turn; only the auto-generated tool list in the rendered prompt varies. Stash them
 	// at before_agent_start so the agent_start recording below can reuse them.
 	type RecordOptions = Parameters<typeof recordSystemPrompt>[2];
@@ -2111,6 +2419,7 @@ export default function (pi: ExtensionAPI) {
 		appendSystemPrompt?: string;
 		contextFiles?: { path: string; content: string }[];
 		skills?: Parameters<typeof promptCaptures.record>[1]["skills"];
+		sections?: Record<string, string>;
 		selectedTools?: string[];
 	} | undefined) {
 		if (!systemPrompt) return;
@@ -2120,6 +2429,7 @@ export default function (pi: ExtensionAPI) {
 			append: options?.appendSystemPrompt,
 			contextFiles: options?.contextFiles ?? [],
 			skills: hasRead ? options?.skills ?? [] : [],
+			sections: options?.sections,
 		}, source);
 	}
 	pi.on("before_agent_start", (event) => {
@@ -2136,18 +2446,16 @@ export default function (pi: ExtensionAPI) {
 	// and ships pi's harness — tripping the server's third-party plan-eligibility check
 	// ("out of extra usage"). Recording it here, before the query, restores the match.
 	//
-	// The widening needs pi's section-based prompt (post-0.85.1); on 0.85.1 the prompt is
-	// a fixed string and this record is a redundant-but-harmless second key that still
-	// catches a later handler rewriting the prompt (it also captures a handler-returned
-	// forceSystemPrompt, which buildSystemPrompt renders verbatim).
+	// agent_start also captures a handler-returned forceSystemPrompt, which
+	// buildSystemPrompt renders verbatim.
 	pi.on("agent_start", (_event, ctx) => {
 		recordSystemPrompt("agent_start", ctx.getSystemPrompt(), lastSystemPromptOptions);
 	});
 
-	// Mid-run re-renders: turn_start fires before every turn (first turn included, both
-	// architectures) after the turn's prompt is final: prepareNextTurnWithContext has
+	// Mid-run re-renders: turn_start fires before every turn (first turn included)
+	// after the turn's prompt is final: prepareNextTurnWithContext has
 	// re-rendered the options (pi's section-based prompt) and any mid-run
-	// setActiveToolsByName rebuild (0.85.1) already landed. Re-keying at each boundary
+	// setActiveToolsByName rebuild has already landed. Re-keying at each boundary
 	// the prompt can change at keeps exact-match alive mid-run. The stashed options can
 	// lag a mid-run tool-loadout change, which skews the hasRead skills filter until the
 	// next before_agent_start — accepted: a stale skills list beats failing the turn.
@@ -2198,16 +2506,19 @@ export default function (pi: ExtensionAPI) {
 	// slice(cursor) === [] (or skip entries) and keep --resume'ing a CC
 	// session that no longer matches pi's history. /compact in particular
 	// triggers CC's autocompact-thrashing guard (issue #8). Force the next
-	// call down the REBUILD path so CC sees the current history.
-	const markRebuild = (event: string) => {
-		historyGeneration++;
-		if (sharedSession) {
-			debug(`${event}: marking needsRebuild on session ${sharedSession.sessionId.slice(0, 8)}`);
-			sharedSession = { ...sharedSession, needsRebuild: true };
-		}
-	};
-	pi.on("session_compact", (event) => markRebuild(`session_compact:${event.reason}:willRetry=${event.willRetry}`));
-	pi.on("session_tree", () => markRebuild("session_tree"));
+	// call down the REBUILD path so CC sees the current history — and, when a
+	// query is parked at a tool boundary while this fires, discard that query
+	// instead of resuming it (markRebuild, discardRewrittenQuery).
+	//
+	// Attributed to the compacting session (ctx.sessionManager belongs to the
+	// session whose runner fired this), so a subagent compacting while its
+	// parent sits parked on the Agent tool result discards nothing — the parent's
+	// query is live and its conversation untouched. Registered by every instance
+	// of this module; instances sponsoring stale marks forward them to the
+	// serving instance via sponsorMarkRebuildForSession.
+	pi.on("session_compact", (event, ctx) =>
+		sponsorMarkRebuildForSession(ctx.sessionManager.getSessionId(), `session_compact:${event.reason}:willRetry=${event.willRetry}`));
+	pi.on("session_tree", (_event, ctx) => sponsorMarkRebuildForSession(ctx.sessionManager.getSessionId(), "session_tree"));
 
 	// Branch summarization — rewind or fork-at-point with "summarize" — is the other
 	// place pi asks the model for a summary, and unlike compaction it runs through
@@ -2273,7 +2584,8 @@ export default function (pi: ExtensionAPI) {
 		apiKey: "not-used",
 		api: "claude-bridge",
 		models: registeredModels,
-		// Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
+		// Cast: the Provider interface passes a TranscriptContext; the bridge takes plain
+		// Context models (toBridgeContext normalizes at the stream entry points).
 		streamSimple: streamClaudeAgentSdk as any,
 	};
 	if (!g[ACTIVE_STREAM_SIMPLE_KEY]) {
@@ -2296,36 +2608,19 @@ export default function (pi: ExtensionAPI) {
 	// --- AskClaude tool ---
 
 	const askConf = config.askClaude;
-	const allowFull = askConf?.allowFullMode !== false;
-	const defaultMode = askConf?.defaultMode ?? "read";
-	const defaultIsolated = askConf?.defaultIsolated ?? false;
+	const askDefaults = resolveAskClaudeDefaults(askConf);
 	askClaudeToolName = askConf?.name ?? "AskClaude";
 
-	const modeValues = allowFull ? ["read", "full", "none"] as const : ["read", "none"] as const;
-	let modeDesc = `"read" (default): questions about the codebase — review, analysis, explain. "none": general knowledge only (no file access).`;
-	if (allowFull) modeDesc += ` "full": allows writing and bash execution (careful: runs without feedback to pi).`;
-
 	if (askConf?.enabled) {
-		const askClaudeParams = Type.Object({
-			prompt: Type.String({ description: "The question or task for Claude Code. By default Claude sees the full conversation history. Don't research up front, let Claude explore." }),
-			mode: Type.Optional(StringEnum(modeValues, { description: modeDesc })),
-			model: Type.Optional(Type.String({ description: 'Claude model (e.g. "opus", "sonnet", "haiku", or full ID). Defaults to "opus".' })),
-			thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const, { description: "Thinking effort level. Omit to use Claude Code's default." })),
-			isolated: Type.Optional(Type.Boolean({ description: "When true, Claude sees only this prompt (clean session). When false (default), Claude sees the full conversation history." })),
-		});
+		const askClaudeParams = buildAskClaudeParams(askDefaults);
 		pi.registerTool<typeof askClaudeParams>({
 			name: askConf?.name ?? "AskClaude",
 			label: askConf?.label ?? "Ask Claude Code",
-			description: askConf?.description ?? (allowFull ? DEFAULT_TOOL_DESCRIPTION_FULL : DEFAULT_TOOL_DESCRIPTION),
+			description: askClaudeToolDescription(askDefaults, askConf?.description),
 			parameters: askClaudeParams,
 			renderCall(args, theme) {
 				let text = theme.fg("mdLink", theme.bold("AskClaude "));
-				const mode = args.mode ?? defaultMode;
-				const tags: string[] = [];
-				if (mode !== defaultMode) tags.push(`mode=${mode}`);
-				if (args.model) tags.push(`model=${args.model}`);
-				if (args.thinking) tags.push(`thinking=${args.thinking}`);
-				if (args.isolated) tags.push("isolated");
+				const tags = askClaudeCallTags(args, askDefaults);
 				if (tags.length) text += `${theme.fg("accent", `[${tags.join(", ")}]`)} `;
 				const truncated = args.prompt.length > PREVIEW_MAX_CHARS ? args.prompt.substring(0, PREVIEW_MAX_CHARS) : args.prompt;
 				const lines = truncated.split("\n").slice(0, PREVIEW_MAX_LINES);
@@ -2373,8 +2668,8 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
-				const mode = (params.mode ?? defaultMode) as "full" | "read" | "none";
-				const isolated = params.isolated ?? defaultIsolated;
+				const mode = resolveAskClaudeMode(params.mode, askDefaults);
+				const isolated = params.isolated ?? askDefaults.isolated;
 				const toolCalls = new Map<string, ToolCallState>();
 				const start = Date.now();
 
@@ -2396,6 +2691,7 @@ export default function (pi: ExtensionAPI) {
 						thinking: params.thinking,
 						isolated,
 						context: isolated ? undefined : buildSessionContext(ctx.sessionManager.getBranch()).messages as Context["messages"],
+						piSessionId: ctx.sessionManager.getSessionId(),
 					});
 					clearInterval(progressInterval);
 					onUpdate?.({ content: [{ type: "text", text: "" }], details: {} });
