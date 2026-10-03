@@ -8,6 +8,7 @@
 - **Tests: a mid-reply compaction reaches Claude Code, end to end** — `tests/int-compact-midreply.mjs` runs pi and a real Claude Code against a stub Messages API, at no API cost, and asserts every model call after a compaction carries the summary and a smaller context, with and without a message queued behind the tool result.
 - **Tests: the bash suites run without GNU coreutils** — macOS has no `timeout`, so every case in `int-smoke.sh`, `int-multi-turn.sh` and `int-cache.sh` exited 127 and the suites reported failures they never ran. `tests/lib/bash-setup.sh` defines a `gtimeout`/perl-backed shim when the command is missing. `npm test` also sources `./.env.test` by path: macOS `sh` is bash in POSIX mode, whose `.` looks a slash-less name up on `PATH` only, so with `.env.test` present the script died before running any suite.
 - **Tests: the config unit tests no longer write the real agent config** — `tests/unit-config.mjs` moved `HOME` to a temp dir, but `getAgentDir()` prefers `PI_CODING_AGENT_DIR`, so with it exported the tests wrote a malformed `claude-bridge.json` into that dir and failed on it. The temp home now unsets it too.
+- **Tests: the gitStatus contract's control ignores the user's Claude Code settings** — CC merges `~/.claude/settings.json`, so `includeGitInstructions: false` there stripped the snapshot from the default-preset arm and failed the control. It now passes the default, `true`, explicitly.
 
 ## 0.9.1 — 2026-09-30
 

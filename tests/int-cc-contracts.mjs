@@ -627,13 +627,16 @@ test("includeGitInstructions:false strips gitStatus and keeps the preset static 
 		// the system blocks, and it may move again. Both turns are fresh (no
 		// resume): a resumed conversation echoes msg[0] from session start, while
 		// the bridge's rebuild path re-invokes fresh and recomputes it — the shape
-		// where the break lives.
-		await collect(query({ prompt: "Reply OK.", options: opts({}) }));
+		// where the break lives. The default is passed explicitly: CC merges the
+		// user's ~/.claude/settings.json, where includeGitInstructions:false would
+		// strip the snapshot from the control too.
+		const presetDefault = { includeGitInstructions: true };
+		await collect(query({ prompt: "Reply OK.", options: opts(presetDefault) }));
 		const ctrlFirst = requests.at(-1);
 		assert.ok(JSON.stringify(ctrlFirst).includes("gitStatus"),
 			"the preset no longer carries a gitStatus block — this test's negative side is obsolete");
 		writeFileSync(join(repo, "ctrl-new.txt"), "x\n");
-		await collect(query({ prompt: "Reply OK.", options: opts({}) }));
+		await collect(query({ prompt: "Reply OK.", options: opts(presetDefault) }));
 		const [c1, c2] = [presetReqs().at(-2), presetReqs().at(-1)];
 		assert.ok(JSON.stringify(c1.messages[0]).includes("gitStatus") && JSON.stringify(c2.messages[0]).includes("gitStatus"),
 			"git snapshot no longer rides in the leading user message — re-point this control");
