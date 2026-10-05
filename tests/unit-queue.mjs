@@ -64,7 +64,7 @@ const TOOLS = ["alpha", "beta", "gamma"].map((name) => ({
 async function startQuery(turnToolCallIds) {
 	const c = new QueryContext();
 	c.turnToolCallIds = [...turnToolCallIds];
-	const servers = __test.buildMcpServers(TOOLS, c);
+	const servers = __test.buildMcpServers(TOOLS, c, {});
 	return { c, callTool: await connectClient(Object.values(servers)[0]) };
 }
 

@@ -18,12 +18,14 @@ import { makePromptStream, userMessage, type PromptStream } from "./prompt-strea
 import { claudeCodeSettings, loadConfig, markStartupNoticeShown, type Config } from "./config.js";
 import {
 	collectPromptSkills,
+	collectToolPrompts,
 	projectPromptCapture,
 	sharedPromptCaptures,
 	type PromptCapture,
 } from "./prompt-capture.js";
 import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachment } from "./attachments.js";
 import { createToolServer } from "./mcp-server.js";
+import { describeTool, toolPromptsFrom, type ToolPrompts } from "./tool-prompts.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
 import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, resolveAskClaudeDefaults, resolveAskClaudeMode, type AskClaudeMode } from "./askclaude-schema.js";
 import { nonSystemMessages, toBridgeContext } from "./transcript.js";
@@ -66,6 +68,10 @@ const CC_CHILD_ENV = {
 // paths; the filename globs cover user, ancestor, project and .claude/ copies,
 // while rules need their own. Managed/policy memory is not excludable by design.
 const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/AGENTS.md", "**/.claude/rules/**"];
+
+// Claude Code cuts MCP tool descriptions at 2,048 chars by default, which drops the
+// guidelines describeTool appends to a long pi description.
+const MCP_DESCRIPTION_CAP = "100000";
 
 // Ensure the debug log directory exists when debug is enabled
 if (DEBUG) {
@@ -1089,11 +1095,11 @@ function resolveMcpTools(context: Context, excludeToolName?: string): {
 // it, and a handler that runs first parks its resolver in `pendingToolCalls`.
 // Handlers close over the captured `queryCtx`, ensuring they operate on the
 // correct query's state while multiple queries run concurrently.
-function buildMcpServers(tools: Tool[], queryCtx: QueryContext): Record<string, ReturnType<typeof createToolServer>> | undefined {
+function buildMcpServers(tools: Tool[], queryCtx: QueryContext, toolPrompts: ToolPrompts): Record<string, ReturnType<typeof createToolServer>> | undefined {
 	if (!tools.length) return undefined;
 	const mcpTools = tools.map((tool) => ({
 		name: tool.name,
-		description: tool.description,
+		description: describeTool(tool.description, toolPrompts[tool.name]),
 		inputSchema: tool.parameters,
 		handler: async (toolCallId: string) => {
 			if (queryCtx.pendingResults.has(toolCallId)) {
@@ -1928,7 +1934,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	void promptStream.push(userMessage(promptBlocks ?? [{ type: "text", text: promptText }]))
 		.catch((error) => debug(`provider: initial prompt push rejected:`, error));
 	queryCtx.promptStream = promptStream;
-	const mcpServers = buildMcpServers(mcpTools, queryCtx);
+	const mcpServers = buildMcpServers(mcpTools, queryCtx, promptCapture ? collectToolPrompts(promptCapture) : {});
 
 	// MCP auto-loading suppression: CC reads MCP servers from ~/.claude.json (top-level
 	// + per-project) and .mcp.json. Since pi executes tools (not CC), those are pure
@@ -1969,7 +1975,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// also autocompact would double-flush the prompt cache and races pi's
 	// threshold with CC's, including CC's anti-thrashing guard (issue #8).
 	// Manual /compact in CC still works (we never invoke it).
-	const childEnv = { ...process.env, ...CC_CHILD_ENV };
+	const childEnv = { ...process.env, ...CC_CHILD_ENV, CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: MCP_DESCRIPTION_CAP };
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
 		env: childEnv,
@@ -1989,6 +1995,9 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			...claudeCodeSettings(providerSettings),
 			claudeMdExcludes: CLAUDE_MD_EXCLUDES,
 			includeGitInstructions: false,
+			// The user's Claude Code hooks are written for Claude Code sessions, and their
+			// output would land in pi's conversation as if pi had sent it.
+			disableAllHooks: true,
 		},
 		systemPrompt: {
 			type: "preset", preset: "claude_code",
@@ -2421,6 +2430,8 @@ export default function (pi: ExtensionAPI) {
 		skills?: Parameters<typeof promptCaptures.record>[1]["skills"];
 		sections?: Record<string, string>;
 		selectedTools?: string[];
+		toolSnippets?: Record<string, string>;
+		toolGuidelines?: Record<string, string[]>;
 	} | undefined) {
 		if (!systemPrompt) return;
 		const hasRead = !options?.selectedTools || options.selectedTools.includes("read");
@@ -2430,6 +2441,7 @@ export default function (pi: ExtensionAPI) {
 			contextFiles: options?.contextFiles ?? [],
 			skills: hasRead ? options?.skills ?? [] : [],
 			sections: options?.sections,
+			toolPrompts: toolPromptsFrom(options?.toolSnippets, options?.toolGuidelines),
 		}, source);
 	}
 	pi.on("before_agent_start", (event) => {
