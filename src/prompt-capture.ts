@@ -2,6 +2,7 @@ import type { Skill } from "@earendil-works/pi-coding-agent";
 import { formatProjectContext } from "./agents-md.js";
 import { DEBUG_LOG_PATH } from "./log-paths.js";
 import { renderSkillsBlock, type SkillReadTool } from "./skills.js";
+import type { ToolPrompts } from "./tool-prompts.js";
 
 // What pi assembled for one agent, kept so the bridge can append only the
 // portable parts after Claude Code's own preset.
@@ -15,6 +16,7 @@ export type PromptCaptureInput = {
 	 *  section name. pi renders each one as `<name>\ncontent\n</name>` after the built-in
 	 *  sections; the projection does the same. */
 	sections?: Record<string, string>;
+	toolPrompts?: ToolPrompts;
 };
 
 type InheritedPrompt = {
@@ -94,6 +96,7 @@ export class PromptCaptures {
 		// Copied, not referenced: the caller's systemPromptOptions is a live object that
 		// later before_agent_start handlers mutate.
 		capture.sections = { ...input.sections };
+		capture.toolPrompts = { ...input.toolPrompts };
 		capture.source = source;
 		if (!existing || customChanged) {
 			capture.inherited = this.findInheritedPrompts(systemPrompt, input.custom);
@@ -322,6 +325,21 @@ export function collectPromptSkills(capture: PromptCapture): Skill[] {
 		visited.add(node);
 	};
 
+	visit(capture);
+	return result;
+}
+
+// A capture's own entry for a tool wins over an ancestor's.
+export function collectToolPrompts(capture: PromptCapture): ToolPrompts {
+	const result: ToolPrompts = {};
+	const visiting = new Set<PromptCapture>();
+	const visit = (node: PromptCapture): void => {
+		if (visiting.has(node)) throw new Error("Cyclic prompt inheritance");
+		visiting.add(node);
+		for (const edge of node.inherited) visit(edge.parent);
+		Object.assign(result, node.toolPrompts);
+		visiting.delete(node);
+	};
 	visit(capture);
 	return result;
 }

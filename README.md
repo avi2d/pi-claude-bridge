@@ -115,7 +115,10 @@ When filing a bug about a session-resume failure (e.g. "No conversation found"),
 
 ### Which injection routes reach Claude Code
 
-The bridge forwards pi's structured parts — project context files, skills, custom prompt, appended instructions, and custom prompt sections (`systemPromptOptions.sections`) — and drops the rest. Measured against the request body (`diag/capture-proxy.mjs`):
+The bridge forwards pi's structured parts and drops the rest.
+The structured parts are project context files, skills, custom prompt, appended instructions, and custom prompt sections from `systemPromptOptions.sections`.
+Each tool's `promptSnippet` and `promptGuidelines`, which pi renders into its `<tools>` and `<rules>` sections, travel in that tool's description instead.
+Measured against the request body with `diag/capture-proxy.mjs`:
 
 | Route | Reaches Claude Code |
 |---|---|
@@ -132,7 +135,9 @@ To add instructions, use `message`, `context`, or a system-message edit that kee
 
 ### Hooks written for Claude Code
 
-`~/.claude/settings.json` hooks fire inside bridge turns, so a hook injecting Claude-specific guidance duplicates what pi's extensions already provide. pi sets `PI_CODING_AGENT=true` for child processes, including the Claude Code child; a hook can skip itself on that:
+Provider turns run Claude Code with `disableAllHooks`, so user, project and plugin hooks do not fire there and their output never reaches the request.
+AskClaude still runs them, so a hook injecting Claude-specific guidance duplicates what pi's extensions already provide.
+pi sets `PI_CODING_AGENT=true` for child processes, including AskClaude's Claude Code child, and a hook can skip itself on that:
 
 ```sh
 [ -n "$PI_CODING_AGENT" ] && exit 0
