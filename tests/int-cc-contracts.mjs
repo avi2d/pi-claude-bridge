@@ -31,7 +31,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -583,6 +583,75 @@ test("claudeMdExcludes prevents native AGENTS.md from duplicating forwarded inst
 	} finally {
 		api.close();
 		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+// --- Settings-file hooks ---
+
+test("disableAllHooks keeps settings-file SessionStart and UserPromptSubmit output out of the request", { timeout: 180_000 }, async () => {
+	const requests = [];
+	const api = await stubApi(requests);
+	const cwd = mkdtempSync(join(tmpdir(), "cc-hooks-"));
+	const sessionMarker = `session-start-hook-${randomUUID()}`;
+	const promptMarker = `prompt-submit-hook-${randomUUID()}`;
+	const hook = (marker) => [{ matcher: "", hooks: [{ type: "command", command: `echo ${marker}`, timeout: 10 }] }];
+	mkdirSync(join(cwd, ".claude"));
+	writeFileSync(join(cwd, ".claude", "settings.json"), JSON.stringify({
+		hooks: { SessionStart: hook(sessionMarker), UserPromptSubmit: hook(promptMarker) },
+	}));
+	try {
+		for (const disableAllHooks of [false, true]) {
+			const { result } = await collect(query({
+				prompt: "Reply OK.",
+				options: providerOptions({
+					cwd, maxTurns: 1, persistSession: false,
+					env: { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" },
+					settings: { disableAllHooks },
+					systemPrompt: { type: "preset", preset: "claude_code" },
+				}),
+			}));
+			assert.equal(result?.subtype, "success");
+			const request = JSON.stringify(requests.at(-1));
+			for (const marker of [sessionMarker, promptMarker]) {
+				assert.equal(request.includes(marker), !disableAllHooks, disableAllHooks
+					? `hook output ${marker} reached the request despite disableAllHooks`
+					: `CC did not run the project hook that prints ${marker} — the control proves nothing`);
+			}
+		}
+	} finally {
+		api.close();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+// --- MCP tool description cap ---
+
+test("MCP tool descriptions are cut at 2,048 chars unless CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH raises the cap", { timeout: 120_000 }, async () => {
+	const requests = [];
+	const api = await stubApi(requests);
+	const description = `${"Long description. ".repeat(200)}END-OF-DESCRIPTION`;
+	try {
+		for (const cap of [undefined, "100000"]) {
+			const { result } = await collect(query({
+				prompt: "Reply OK.",
+				options: providerOptions({
+					maxTurns: 1, persistSession: false,
+					env: {
+						...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1",
+						...(cap ? { CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: cap } : {}),
+					},
+					mcpServers: toolServer([{ name: "LongTool", description, inputSchema: { type: "object", properties: {} } }], []),
+				}),
+			}));
+			assert.equal(result?.subtype, "success");
+			const sent = requests.at(-1).tools.find((tool) => tool.name === "mcp__custom-tools__LongTool")?.description;
+			assert.ok(sent, "LongTool was not in the request");
+			if (cap) assert.equal(sent, description, "a raised cap still changed the description");
+			else assert.ok(!sent.includes("END-OF-DESCRIPTION") && sent.length < description.length,
+				`a ${description.length}-char description arrived at ${sent.length} chars — CC no longer caps it, so the raised cap is unneeded`);
+		}
+	} finally {
+		api.close();
 	}
 });
 
