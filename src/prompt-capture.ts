@@ -1,6 +1,6 @@
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { formatProjectContext } from "./agents-md.js";
-import { DEBUG_LOG_PATH } from "./log-paths.js";
+import { debugLogPath } from "./log-paths.js";
 import { renderSkillsBlock, type SkillReadTool } from "./skills.js";
 import type { ToolPrompts } from "./tool-prompts.js";
 
@@ -407,7 +407,7 @@ function assertSendablePrompt(parts: readonly PromptPart[], capture: PromptCaptu
 		`  Capture: ${capture.source ?? "unknown"}, ${capture.inherited.length} inherited capture(s) substituted.`,
 		"  If this came from an inherited pi prompt, see README \"Compatibility with other extensions\".",
 		"  If it is your own text, reword or remove it. CLAUDE_BRIDGE_DEBUG=1 writes the full prompt to",
-		`  ${DEBUG_LOG_PATH}.`,
+		`  ${debugLogPath()}.`,
 	].join("\n"));
 }
 
