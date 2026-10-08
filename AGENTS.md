@@ -13,8 +13,9 @@ Five wrong conclusions across two sessions came from skipping the above.
 ## Adding a model
 
 The picker is built from pi-ai's static builtin catalog (`getModels("anthropic")`
-in `src/index.ts`), so an id pi-ai has not shipped never appears in `/model` —
-check `node_modules/@earendil-works/pi-ai/dist/providers/data/anthropic.json`
+in `src/index.ts`) plus `MODELS_AHEAD_OF_CATALOG` in `src/models.ts`, so an id
+in neither never appears in `/model`. Check
+`node_modules/@earendil-works/pi-ai/dist/providers/data/anthropic.json`
 before concluding a bridge change made a model reachable. `--model
 claude-bridge/<unlisted-id>` still launches, because pi's `buildFallbackModel`
 clones the provider's first registered model and overrides its id: the window
