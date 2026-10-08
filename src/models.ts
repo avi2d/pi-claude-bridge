@@ -29,6 +29,25 @@ function versionRank(id: string): { family: string; tuple: [number, number] } {
 	return { family, tuple: [Number(major) || 0, Number(minor) || 0] };
 }
 
+// Models Claude Code serves that pi-ai's catalog does not list yet. A catalog
+// entry with the same id replaces the one here.
+const MODELS_AHEAD_OF_CATALOG = [
+	{
+		id: "claude-haiku-5-5",
+		name: "Claude Haiku 5.5",
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: ONE_M_CONTEXT,
+		maxTokens: 128_000,
+		thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+	},
+];
+
+export function withModelsAheadOfCatalog<T extends { id: string }>(catalog: T[]) {
+	const listed = new Set(catalog.map((m) => m.id));
+	return [...catalog, ...MODELS_AHEAD_OF_CATALOG.filter((m) => !listed.has(m.id))];
+}
+
 export function buildModels<T extends { id: string; [key: string]: any }>(piAiModels: T[]) {
 	return piAiModels
 		.filter((m) => typeof m.id === "string" && !isDatedAlias(m.id))
@@ -77,7 +96,7 @@ export type ClaudeCodeRuntimeModel = {
 // - The registered contextWindow must match the window the bridge actually
 //   requests, or pi's status bar and compaction threshold misreport.
 // [1m] ids verified to serve 1M on every plan (sonnet-5-5 measured on Pro with
-// and without Extra Usage; opus-5-5 on Max per its run notes). A new model
+// and without Extra Usage; opus-5-5 and haiku-5-5 on Max per their run notes). A new model
 // serves 200K until someone measures it (diag/context-size.mjs) and adds it
 // here. Known exception unrelated to long context: fable-5 is not included
 // with Pro account without Extra Usage.
@@ -88,8 +107,9 @@ const MEASURED_ONE_M = new Set([
 	"claude-opus-5",
 	"claude-opus-4-8",
 	"claude-opus-4-7",
-  "claude-sonnet-5",
+	"claude-sonnet-5",
 	"claude-sonnet-5-5",
+	"claude-haiku-5-5",
 ]);
 
 // Measured exceptions: pi-ai declares 1M and the [1m] id works, but only when

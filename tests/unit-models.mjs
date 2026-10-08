@@ -7,7 +7,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { applyLongContext, buildModels, claudeCodeModelId, resolveClaudeCodeRuntimeModel, resolveModel } from "../src/models.js";
+import { applyLongContext, buildModels, claudeCodeModelId, resolveClaudeCodeRuntimeModel, resolveModel, withModelsAheadOfCatalog } from "../src/models.js";
 import { getModels } from "@earendil-works/pi-ai/compat";
 
 const PRO = { plan: "pro", longContextExtraUsage: false };
@@ -71,6 +71,21 @@ describe("MODELS projection", () => {
 		assert.deepEqual(find(models, "claude-sonnet-5")?.thinkingLevelMap, { xhigh: "xhigh", max: "max" });
 	});
 
+	it("lists claude-haiku-5-5 while pi-ai's catalog lacks it", () => {
+		const models = buildModels(withModelsAheadOfCatalog(getModels("anthropic")));
+		const haiku = find(models, "claude-haiku-5-5");
+		assert.ok(haiku, "haiku-5-5 present");
+		assert.equal(haiku.contextWindow, 1000000);
+		assert.equal(haiku.maxTokens, 128000);
+		assert.equal(resolveModel(models, "haiku")?.id, "claude-haiku-5-5");
+	});
+
+	it("a catalog entry for claude-haiku-5-5 replaces the bridge's own", () => {
+		const catalog = [mockPiAiModel("claude-haiku-5-5", { name: "from pi-ai" })];
+		const models = buildModels(withModelsAheadOfCatalog(catalog));
+		assert.deepEqual(models.map((m) => [m.id, m.name]), [["claude-haiku-5-5", "from pi-ai"]]);
+	});
+
 	it("forwards undefined thinkingLevelMap unchanged (no fabricated defaults)", () => {
 		const models = buildModels([mockPiAiModel("claude-haiku-4-5")]);
 		assert.equal(find(models, "claude-haiku-4-5")?.thinkingLevelMap, undefined);
@@ -99,7 +114,7 @@ describe("resolveModel", () => {
 
 describe("Claude Code runtime policy", () => {
 	it("measured-1M ids send [1m] on every plan", () => {
-		for (const id of ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-sonnet-5"]) {
+		for (const id of ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5"]) {
 			assert.deepEqual(resolveClaudeCodeRuntimeModel(oneM(id), PRO), { cliModelId: `${id}[1m]`, contextWindow: 1000000 });
 		}
 	});
@@ -188,6 +203,12 @@ describe("applyLongContext", () => {
 		const extra = applyLongContext(models, EXTRA);
 		assert.equal(find(extra, "claude-sonnet-4-6").name, "Claude Sonnet 4.6 1M");
 	});
+});
+
+it("claude-haiku-5-5 registers as 1M on Pro", () => {
+	const haiku = find(applyLongContext(buildModels(withModelsAheadOfCatalog(getModels("anthropic"))), PRO), "claude-haiku-5-5");
+	assert.equal(haiku.contextWindow, 1000000);
+	assert.equal(haiku.name, "Claude Haiku 5.5 1M");
 });
 
 it("claude-opus-5-5 requests 1M on Pro", () => {

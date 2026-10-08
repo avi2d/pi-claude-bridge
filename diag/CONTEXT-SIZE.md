@@ -43,6 +43,13 @@ options and auth:
   `overageStatus: "rejected"`, `overageDisabledReason: "org_level_disabled"`
 - Date: 2026-09-28
 
+The Haiku 5.5 rows come from a later run, same options and auth:
+
+- Claude Agent SDK 0.3.293 (bundled Claude Code 2.1.293)
+- Plan: Max 20x. The rate-limit events report `isUsingOverage: false` and no
+  `overageStatus`, so whether Extra Usage was enabled is not recorded.
+- Date: 2026-10-08
+
 ## Served context windows
 
 Four conditions, each run with the probe above. Values are tokens; `1M` =
@@ -70,6 +77,8 @@ the footnote below the table).
 | `claude-sonnet-5[1m]`    | 1M               | 1M              | —                | —               |
 | `claude-sonnet-4-6`       | 200K             | 200K            | 200K             | 200K            |
 | `claude-sonnet-4-6[1m]`  | 429              | 1M              | 429              | 1M              |
+| `claude-haiku-5-5`        | —                | —               | 1M               | —               |
+| `claude-haiku-5-5[1m]`   | —                | —               | 1M               | —               |
 | `claude-haiku-4-5`        | 200K             | 200K            | 200K             | 200K            |
 | `claude-haiku-4-5[1m]`   | 429†             | 400             | 400              | 400             |
 
@@ -78,7 +87,8 @@ Opus 5.5 `.test-output/context-size/max-2026-09-23T13-50-08-107Z.json` and
 `max-2026-09-22T17-31-*.json` (SDK 0.3.280),
 Sonnet 5.5 `.test-output/context-size/max-2026-09-28T18-33-28-340Z.json`
 (Pro credits on) and `.test-output/context-size/pro-2026-09-28T18-56-52-762Z.json`
-(Pro credits off)
+(Pro credits off),
+Haiku 5.5 `.test-output/context-size/max-2026-10-08T09-47-43-756Z.json`
 
 `—` = not yet tested in that condition. Max-credits-on matched Pro-credits-on
 for every cell tested in both (shown for completeness). Opus 5.5 served 1M from
