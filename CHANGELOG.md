@@ -2,7 +2,6 @@
 
 ## UNRELEASED
 
-- **Add: Claude Haiku 5.5 with the 1M window** — `claude-haiku-5-5` is listed until pi-ai's catalog ships it, and a catalog entry with the same id replaces the bridge's own. It is in `MEASURED_ONE_M`, so it requests `claude-haiku-5-5[1m]` and registers 1M; `diag/context-size.mjs` measured 1M from both ids on Max with SDK 0.3.293. The `haiku` shortcut now resolves to Haiku 5.5.
 - **Fix: Claude gets pi's per-tool guidance, and no Claude Code hooks, on the provider path** — Each MCP tool's description now carries the `promptSnippet` and `promptGuidelines` pi renders into its `<tools>` and `<rules>` sections, read from `systemPromptOptions` and inherited by sub-agent prompts; the sections themselves still are not forwarded. `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` is raised so Claude Code's 2,048-char cap does not cut them. Provider queries pass `disableAllHooks`, so the user's SessionStart and UserPromptSubmit hook output no longer lands in pi's conversation; settings sources stay loaded for `env` and `apiKeyHelper`. AskClaude is unchanged. `tests/int-cc-contracts.mjs` pins both CC behaviors.
 - **Tests: steering suites follow the model, not the version** — `tests/int-tool-message.mjs` runs on `claude-sonnet-5` (overridable with `BRIDGE_TOOL_MESSAGE_MODEL`) and adds echo and ≤6-of-12 tool-call asserts on models that receive a mid-turn steer as a system message; haiku keeps the structural asserts only. The text-only steer tests start a clean session so a rejected steer cannot poison later turns. `tests/int-cc-contracts.mjs` gains a zero-cost tripwire pinning where CC puts a mid-turn steer after an MCP tool result: a system message on opus-5-5, inside `tool_result.content` on haiku-4-5.
 - **Tests: a mid-reply compaction reaches Claude Code, end to end** — `tests/int-compact-midreply.mjs` runs pi and a real Claude Code against a stub Messages API, at no API cost, and asserts every model call after a compaction carries the summary and a smaller context, with and without a message queued behind the tool result.
@@ -10,6 +9,18 @@
 - **Tests: the config unit tests no longer write the real agent config** — `tests/unit-config.mjs` moved `HOME` to a temp dir, but `getAgentDir()` prefers `PI_CODING_AGENT_DIR`, so with it exported the tests wrote a malformed `claude-bridge.json` into that dir and failed on it. The temp home now unsets it too.
 - **Tests: the gitStatus contract's control ignores the user's Claude Code settings** — CC merges `~/.claude/settings.json`, so `includeGitInstructions: false` there stripped the snapshot from the default-preset arm and failed the control. It now passes the default, `true`, explicitly.
 
+## 0.9.3 — 2026-10-13
+
+- **Remove: compaction and branch-summary takeovers (#189)** — pi runs them natively; the bridge routes summary calls to its isolated path. Other compaction extensions should now work. Resolves #115. Thanks @sonSunnoi.
+- **Deprecate: AskClaude tool** — Show a one-time notice on first use; remove the startup reminder to opt in.
+- **Fix: Haiku 5.5 registered at 1M (#190)** — Thanks @Blue-B.
+- **Fix: hang when a stream is cut right after a tool call starts (#146)** — Tool calls now dispatch only once their block closes, so pi no longer gets a `{}`-argument call Claude Code has dropped. Thanks @andreypopp.
+- **Fix: tool result after a restart resumes the turn (#174)** — a result with no parked query ends the turn only when pi delivers it on an aborted request; otherwise (restart, crash, stall, retry) it resumes the Claude Code session. Thanks @jcwasher.
+- **Fix: Claude Code runs in the pi session's cwd (#175)** — hosts serving many sessions from one process (pi-web) spawned it in the host process cwd, so it loaded that directory's AGENTS.md and mirrored the session under the wrong project. Thanks @SoulKyu.
+- **Add: report plan usage through pi's `after_provider_response` (#171)** — Claude Code's usage updates arrive as `anthropic-ratelimit-unified-*` headers, so extensions that read usage from the built-in `anthropic` provider work with the bridge too. Thanks @fj.
+- **Fix: one-off calls honor the caller's reasoning level (#184)** — compaction summaries, `/bug-report` summaries and extension one-shots that pass `reasoning` now send it to Claude Code as `effort` instead of using its default. Thanks @roberthmms.
+- **Fix: exhausted subscription windows go straight to fallback (#183)** — the error now leads with "Claude quota exceeded", which pi does not retry, and still says "rate limit" for fallback chains. Thanks @good-nightmoon.
+- **Fix: tools with a top-level `anyOf`/`oneOf`/`allOf` schema (#180, issue #179)** — Claude Code dropped them, so a call could run twice or hang the turn. The bridge now flattens the schema the way CC's own normalizer does. Thanks @MataM15.
 ## 0.9.2 — 2026-10-07
 
 - **Fix: synthetic failure notices no longer stream as assistant output (#162)** — keeps pre-output failover working for consumers like pi-model-fallback-alias; the notice text stays on the failed turn's error event. A notice following a stalled stream also drops the dead stream's abandoned partial blocks.
