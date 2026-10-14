@@ -142,10 +142,15 @@ describe("PromptCaptures", () => {
 		// extension's additions gone, because the idle triggerTurn skipped before_agent_start.
 		captures.record(`${PARENT_KEY}\n\n<skills>extension additions</skills>`, capture(), "turn_start");
 
-		assert.throws(
-			() => captures.resolveOrDerive(PARENT_KEY),
-			/pi#5581/,
-		);
+		let error;
+		try {
+			captures.resolveOrDerive(PARENT_KEY);
+		} catch (e) {
+			error = e;
+		}
+		assert.match(String(error?.message), /pi#5581/);
+		assert.match(String(error?.message), /fixed in pi 1\.2\.0/);
+		assert.doesNotMatch(String(error?.message), /instead of triggerTurn/);
 	});
 
 	it("recursively projects an inherited prompt without Pi's harness", () => {
