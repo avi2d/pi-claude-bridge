@@ -179,9 +179,9 @@ export class PromptCaptures {
 			const matches = this.closestKnown(systemPrompt);
 			this.onDiagnose({ systemPrompt, matches });
 			// The query is a recorded key minus its tail. That shape is the signature of
-			// pi#5581: an extension-triggered idle turn (sendMessage with triggerTurn) skips
-			// before_agent_start, so the prompt renders without that turn's extension
-			// additions. The capture cannot serve this turn either way, so name the bug.
+			// pi#5581, fixed in pi 1.2.0: on older pi an extension-triggered idle turn
+			// skipped before_agent_start, so the prompt renders without that turn's
+			// extension additions. The capture cannot serve this turn either way, so name the bug.
 			const truncated = matches.find(
 				(m) => m.firstDivergent === systemPrompt.length && m.key.length > systemPrompt.length,
 			);
@@ -189,9 +189,9 @@ export class PromptCaptures {
 				throw new Error(
 					`prompt-capture: this ${systemPrompt.length}-char prompt is the ${truncated.key.length}-char capture recorded at `
 					+ `${truncated.source ?? "an unknown boundary"} with its final ${truncated.key.length - systemPrompt.length} chars missing. `
-					+ `That shape matches pi#5581: an extension-triggered idle turn (sendMessage with triggerTurn) skips before_agent_start, `
-					+ `so the prompt lacks that turn's extension additions. The turn fails; the next user-typed turn resolves normally. `
-					+ `Workaround: when idle, send a user message instead of triggerTurn.`,
+					+ `That shape matches pi#5581, fixed in pi 1.2.0: on older pi, an extension-triggered idle turn (sendMessage with triggerTurn) skipped before_agent_start, `
+					+ `so the prompt lacked that turn's extension additions. The turn fails; the next user-typed turn resolves normally. `
+					+ `On pi 1.2.0 and later the idle turn runs the same setup as a prompt, so this shape has another cause.`,
 				);
 			}
 			throw new Error(
