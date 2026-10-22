@@ -70,10 +70,6 @@ const CC_CHILD_ENV = {
 // while rules need their own. Managed/policy memory is not excludable by design.
 const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/AGENTS.md", "**/.claude/rules/**"];
 
-// Claude Code cuts MCP tool descriptions at 2,048 chars by default, which drops the
-// guidelines describeTool appends to a long pi description.
-const MCP_DESCRIPTION_CAP = "100000";
-
 // Unique per module evaluation — confirms whether subagents share module state
 const moduleInstanceId = Math.random().toString(36).slice(2, 8);
 
@@ -2039,7 +2035,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// also autocompact would double-flush the prompt cache and races pi's
 	// threshold with CC's, including CC's anti-thrashing guard (issue #8).
 	// Manual /compact in CC still works (we never invoke it).
-	const childEnv = { ...process.env, ...CC_CHILD_ENV, CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: MCP_DESCRIPTION_CAP };
+	const childEnv = { ...process.env, ...CC_CHILD_ENV };
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
 		env: childEnv,

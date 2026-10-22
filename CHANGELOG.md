@@ -2,6 +2,8 @@
 
 ## UNRELEASED
 
+- **Fix: the MCP description-cap raise is gone, CC 2.1.308 passes long descriptions whole** — the 2,048-char truncation the raised cap worked around no longer happens, so the bridge stops setting it and the contract suite pins pass-through instead.
+
 - **Fix: the pi#5581 diagnostic no longer gives stale advice on pi 1.2.0 and later** — pi 1.2.0 runs extension-triggered idle turns through the same `before_agent_start` setup as prompts, so the truncated-prompt error now scopes that cause and its `triggerTurn` workaround to older pi and says the shape has another cause on 1.2.0 and later.
 
 - **Fix: Claude gets pi's per-tool guidance, and no Claude Code hooks, on the provider path** — Each MCP tool's description now carries the `promptSnippet` and `promptGuidelines` pi renders into its `<tools>` and `<rules>` sections, read from `systemPromptOptions` and inherited by sub-agent prompts; the sections themselves still are not forwarded. `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` is raised so Claude Code's 2,048-char cap does not cut them. Provider queries pass `disableAllHooks`, so the user's SessionStart and UserPromptSubmit hook output no longer lands in pi's conversation; settings sources stay loaded for `env` and `apiKeyHelper`. AskClaude is unchanged. `tests/int-cc-contracts.mjs` pins both CC behaviors.

@@ -642,32 +642,24 @@ test("disableAllHooks keeps settings-file SessionStart and UserPromptSubmit outp
 	}
 });
 
-// --- MCP tool description cap ---
+// --- MCP tool descriptions pass through whole ---
 
-test("MCP tool descriptions are cut at 2,048 chars unless CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH raises the cap", { timeout: 120_000 }, async () => {
+test("MCP tool descriptions reach the request whole", { timeout: 120_000 }, async () => {
 	const requests = [];
 	const api = await stubApi(requests);
 	const description = `${"Long description. ".repeat(200)}END-OF-DESCRIPTION`;
 	try {
-		for (const cap of [undefined, "100000"]) {
-			const { result } = await collect(query({
-				prompt: "Reply OK.",
-				options: providerOptions({
-					maxTurns: 1, persistSession: false,
-					env: {
-						...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1",
-						...(cap ? { CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: cap } : {}),
-					},
-					mcpServers: toolServer([{ name: "LongTool", description, inputSchema: { type: "object", properties: {} } }], []),
-				}),
-			}));
-			assert.equal(result?.subtype, "success");
-			const sent = requests.at(-1).tools.find((tool) => tool.name === "mcp__custom-tools__LongTool")?.description;
-			assert.ok(sent, "LongTool was not in the request");
-			if (cap) assert.equal(sent, description, "a raised cap still changed the description");
-			else assert.ok(!sent.includes("END-OF-DESCRIPTION") && sent.length < description.length,
-				`a ${description.length}-char description arrived at ${sent.length} chars — CC no longer caps it, so the raised cap is unneeded`);
-		}
+		const { result } = await collect(query({
+			prompt: "Reply OK.",
+			options: providerOptions({
+				maxTurns: 1, persistSession: false,
+				env: { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" },
+				mcpServers: toolServer([{ name: "LongTool", description, inputSchema: { type: "object", properties: {} } }], []),
+			}),
+		}));
+		assert.equal(result?.subtype, "success");
+		const sent = requests.at(-1).tools.find((tool) => tool.name === "mcp__custom-tools__LongTool")?.description;
+		assert.equal(sent, description, "CC cut the description — the 2,048-char cap is back");
 	} finally {
 		api.close();
 	}
