@@ -47,9 +47,14 @@ const DEBUG = process.env.CLAUDE_BRIDGE_DEBUG === "1";
 //   out of a pi session, which serves its own tools.
 // - DISABLE_AUTO_COMPACT=1: pi owns compaction; CC compacting its own copy would
 //   diverge from pi's history, which is the source of truth for every rebuild.
+// - CLAUDE_CODE_ELEGANT_MEADOW=0: stop CC (2.1.308+) logging every API request
+//   into its session file (`api-request`, `api-request-shape`, `api-request-blob`
+//   records). CC never reads them back to build a request; they only make the
+//   file about a third larger.
 const CC_CHILD_ENV = {
 	ENABLE_CLAUDEAI_MCP_SERVERS: "0",
 	DISABLE_AUTO_COMPACT: "1",
+	CLAUDE_CODE_ELEGANT_MEADOW: "0",
 } as const;
 
 // Pi owns context files on the provider path, so Claude Code must not load its
@@ -64,10 +69,6 @@ const CC_CHILD_ENV = {
 // paths; the filename globs cover user, ancestor, project and .claude/ copies,
 // while rules need their own. Managed/policy memory is not excludable by design.
 const CLAUDE_MD_EXCLUDES = ["**/CLAUDE.md", "**/AGENTS.md", "**/.claude/rules/**"];
-
-// Claude Code cuts MCP tool descriptions at 2,048 chars by default, which drops the
-// guidelines describeTool appends to a long pi description.
-const MCP_DESCRIPTION_CAP = "100000";
 
 // Unique per module evaluation — confirms whether subagents share module state
 const moduleInstanceId = Math.random().toString(36).slice(2, 8);
@@ -2034,7 +2035,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// also autocompact would double-flush the prompt cache and races pi's
 	// threshold with CC's, including CC's anti-thrashing guard (issue #8).
 	// Manual /compact in CC still works (we never invoke it).
-	const childEnv = { ...process.env, ...CC_CHILD_ENV, CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: MCP_DESCRIPTION_CAP };
+	const childEnv = { ...process.env, ...CC_CHILD_ENV };
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
 		env: childEnv,

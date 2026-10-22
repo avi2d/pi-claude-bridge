@@ -84,9 +84,6 @@ describe("provider query options", () => {
 		]);
 	});
 
-	it("lifts Claude Code's MCP description cap so the guidelines arrive whole", () => {
-		assert.ok(Number(options.env.CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH) > 2048);
-	});
 
 	it("turns off the user's Claude Code hooks while keeping their settings sources", () => {
 		assert.equal(options.settings.disableAllHooks, true);

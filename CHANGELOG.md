@@ -2,6 +2,8 @@
 
 ## UNRELEASED
 
+- **Fix: the MCP description-cap raise is gone, CC 2.1.308 passes long descriptions whole** — the 2,048-char truncation the raised cap worked around no longer happens, so the bridge stops setting it and the contract suite pins pass-through instead.
+
 - **Fix: the pi#5581 diagnostic no longer gives stale advice on pi 1.2.0 and later** — pi 1.2.0 runs extension-triggered idle turns through the same `before_agent_start` setup as prompts, so the truncated-prompt error now scopes that cause and its `triggerTurn` workaround to older pi and says the shape has another cause on 1.2.0 and later.
 
 - **Fix: Claude gets pi's per-tool guidance, and no Claude Code hooks, on the provider path** — Each MCP tool's description now carries the `promptSnippet` and `promptGuidelines` pi renders into its `<tools>` and `<rules>` sections, read from `systemPromptOptions` and inherited by sub-agent prompts; the sections themselves still are not forwarded. `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` is raised so Claude Code's 2,048-char cap does not cut them. Provider queries pass `disableAllHooks`, so the user's SessionStart and UserPromptSubmit hook output no longer lands in pi's conversation; settings sources stay loaded for `env` and `apiKeyHelper`. AskClaude is unchanged. `tests/int-cc-contracts.mjs` pins both CC behaviors.
@@ -10,6 +12,7 @@
 - **Tests: the bash suites run without GNU coreutils** — macOS has no `timeout`, so every case in `int-smoke.sh`, `int-multi-turn.sh` and `int-cache.sh` exited 127 and the suites reported failures they never ran. `tests/lib/bash-setup.sh` defines a `gtimeout`/perl-backed shim when the command is missing. `npm test` also sources `./.env.test` by path: macOS `sh` is bash in POSIX mode, whose `.` looks a slash-less name up on `PATH` only, so with `.env.test` present the script died before running any suite.
 - **Tests: the config unit tests no longer write the real agent config** — `tests/unit-config.mjs` moved `HOME` to a temp dir, but `getAgentDir()` prefers `PI_CODING_AGENT_DIR`, so with it exported the tests wrote a malformed `claude-bridge.json` into that dir and failed on it. The temp home now unsets it too.
 - **Tests: the gitStatus contract's control ignores the user's Claude Code settings** — CC merges `~/.claude/settings.json`, so `includeGitInstructions: false` there stripped the snapshot from the default-preset arm and failed the control. It now passes the default, `true`, explicitly.
+- **Bump: Claude Agent SDK 0.3.308 (Claude Code 2.1.308)** — Claude Code's new per-request log in session files is turned off; it made them about a third larger.
 - **Fix: abort ignored after a terminated tool batch (#200, issue #199)** — when a run ended with Claude Code's query parked at a tool call (`terminate: true`), aborting the next run did nothing. Each run that continues the query now binds its own signal. Thanks @orshih6 and @cootue.
 
 ## 0.9.3 — 2026-10-13
