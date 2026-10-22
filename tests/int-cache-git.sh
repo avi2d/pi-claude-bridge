@@ -41,17 +41,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# COMMIT_CMD is what the agent is told to run, verbatim. -c identity flags are
-# required: a fresh repo has no user.email/user.name and the host gitconfig is
-# not guaranteed to provide one.
-COMMIT_CMD="git add -A && git -c user.email=test@test -c user.name=test commit -m 'wip checkpoint'"
+# COMMIT_CMD is what the agent is told to run, verbatim. The repo carries its
+# own identity and an empty hooks dir instead of -c flags: -c identity overrides
+# trip machine-level commit hooks, and the host gitconfig may not provide one.
+COMMIT_CMD="git add -A && git commit -m 'wip checkpoint'"
 
 setup_repo() {
   git -C "$REPO" init -q
   git -C "$REPO" symbolic-ref HEAD refs/heads/main
+  git -C "$REPO" config user.email test@test
+  git -C "$REPO" config user.name test
+  git -C "$REPO" config core.hooksPath "$REPO/.git/empty-hooks"
+  mkdir -p "$REPO/.git/empty-hooks"
   printf 'alpha\n' > "$REPO/seed.txt"
   git -C "$REPO" add -A
-  git -C "$REPO" -c user.email=test@test -c user.name=test commit -q -m "seed commit"
+  git -C "$REPO" commit -q -m "seed commit"
   # Untracked file so the transition commit is non-empty. Turn 2 overwrites its
   # contents with the secret number.
   printf 'beta\n' > "$REPO/scratch.txt"

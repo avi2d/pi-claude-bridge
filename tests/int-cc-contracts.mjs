@@ -682,11 +682,16 @@ test("includeGitInstructions:false strips gitStatus and keeps the preset static 
 	const requests = [];
 	const api = await stubApi(requests);
 	const repo = mkdtempSync(join(tmpdir(), "cc-gitpin-"));
+	const hooksDir = mkdtempSync(join(tmpdir(), "cc-gitpin-hooks-"));
 	const gitIn = (...args) => execFileSync("git", args, { cwd: repo, env: { ...process.env, GIT_AUTHOR_NAME: "probe", GIT_AUTHOR_EMAIL: "p@x", GIT_COMMITTER_NAME: "probe", GIT_COMMITTER_EMAIL: "p@x" } });
 	const env = { ...process.env, ANTHROPIC_BASE_URL: api.url, ENABLE_CLAUDEAI_MCP_SERVERS: "0", DISABLE_AUTO_COMPACT: "1" };
 
 	try {
 		gitIn("init", "-q");
+		// A machine-level core.hooksPath would run foreign hooks in this repo and refuse the probe-identity commit.
+		gitIn("config", "core.hooksPath", hooksDir);
+		gitIn("config", "user.name", "probe");
+		gitIn("config", "user.email", "p@x");
 		gitIn("commit", "--allow-empty", "-qm", "init");
 		const opts = (settings, resume) => providerOptions({
 			cwd: repo, maxTurns: 1, settings, env,
@@ -745,6 +750,7 @@ test("includeGitInstructions:false strips gitStatus and keeps the preset static 
 	} finally {
 		api.close();
 		rmSync(repo, { recursive: true, force: true });
+		rmSync(hooksDir, { recursive: true, force: true });
 	}
 });
 
