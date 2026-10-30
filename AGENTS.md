@@ -35,9 +35,11 @@ Maintain an entry in the `## UNRELEASED` section at the top of `CHANGELOG.md` fo
 - **Tag: summary** — detail
 ```
 
-Do not add changelog entries for docs-only changes. Combine multiple UNRELEASED entries about the same feature into one.
+Do not add changelog entries for docs-only changes, or for small changes (especially test-only ones) unless they relate to an issue. Combine multiple UNRELEASED entries about the same feature into one.
 
-Tags: `Add`, `Fix`, `Refactor`, `Tests`, `Bump`, `Deprecate`, `Remove`.
+Keep entries short: one sentence of detail is usually enough. Only a big change warrants a few sentences. Leave implementation details and file lists to the commit log and docs.
+
+Tags: `Add`, `Fix`, `Refactor`, `Tests`, `Bump`, `Deprecate`, `Remove`, `Debug`.
 
 ## Release
 
@@ -55,6 +57,8 @@ No build step — the package ships `src` TypeScript as-is (see `files` in `pack
 Smoke tests typically need to run outside a sandbox because they access local pi/Claude settings and auth state.
 
 An end-to-end reproduction needs no API spend: `tests/int-compact-midreply.mjs` runs pi, the bridge and a real Claude Code against a scripted stub Messages API through `ANTHROPIC_BASE_URL`, and asserts on the request bodies CC sent.
+
+Cover inputs the model chooses, like tool names and message shapes, not just our own branches. A test of a copy of the code is not coverage.
 
 ## Maintaining this file
 
