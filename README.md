@@ -17,9 +17,12 @@ Pi extension that integrates Claude Code via the [Agent SDK](https://github.com/
 
 ## Install
 
-```
-pi install npm:pi-claude-bridge
-```
+1. Install the extension:
+   ```
+   pi install npm:pi-claude-bridge
+   ```
+2. Log in to Claude Code with your Claude subscription: run `claude` and type `/login`. The bridge uses Claude Code's login, not pi's `/login`.
+3. In pi, pick a `claude-bridge/...` model with `/model`. (Do not use the `anthropic/...` models)
 
 Requires pi 1.2.0 or newer to use all models (but should mostly work >=0.86.1).
 
@@ -80,6 +83,25 @@ Config: `~/.pi/agent/claude-bridge.json` (global) or the project Pi config direc
 **Notices:** the startup notice points out when `provider.plan` is unset and records `startupNoticeShown` in the global config. There's also a deprecation notice on first use of AskClaude that records its display date as `askClaudeDeprecationShown`.
 
 **Extension providers and models.json:** pi's `modelOverrides` in `~/.pi/agent/models.json` do not work correctly with pi-claude-bridge; they only apply to pi-side settings like compaction threshold. Overriding `contextWindow` or other fields requires editing `src/models.ts` directly — to pin a model to 200K, use `provider.forceTwoHundredK` instead.
+
+**Claude Code's environment:** Claude Code inherits pi's environment. For variables only bridge requests should get (a proxy, a gateway, Bedrock settings), add an `env` object to a `claude-bridge` credential in `~/.pi/agent/auth.json`; its values override pi's, and an empty value removes the variable. Extensions calling a bridge model can pass `env` per request the same way. `CLAUDE_CONFIG_DIR`, `HOME` and `USERPROFILE` can't be set there (the turn fails), since the bridge reads Claude Code's session files through pi's own values.
+
+This example sends bridge requests through a proxy and keeps an exported gateway (issue #107) away from Claude Code, so it uses your Claude login:
+
+```json
+{
+  "claude-bridge": {
+    "type": "api_key",
+    "key": "not-used",
+    "env": {
+      "HTTPS_PROXY": "http://127.0.0.1:8080",
+      "ANTHROPIC_BASE_URL": "",
+      "ANTHROPIC_API_KEY": "",
+      "ANTHROPIC_AUTH_TOKEN": ""
+    }
+  }
+}
+```
 
 ## Tests
 
@@ -165,4 +187,4 @@ Session pointers, content digests and record IDs are saved under `claude-bridge/
 
 **System prompt changes mid-session may not reach the model.** Project context (AGENTS.md/CLAUDE.md), skills, and extension-written instructions are captured on the first request and reused while that prompt recording is retained. Start a new session if updated instructions must take effect immediately.
 
-**Exported Anthropic environment variables override the Claude Code child (issue #107).** An exported `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` redirects Claude Code to that gateway and every turn fails with its auth error. Unset them for the pi process.
+**Exported Anthropic environment variables override the Claude Code child (issue #107).** An exported `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, or `ANTHROPIC_AUTH_TOKEN` redirects Claude Code to that gateway and every turn fails with its auth error. Unset them for the pi process, or blank them in a `claude-bridge` credential's `env` (see [Configuration](#configuration)).
