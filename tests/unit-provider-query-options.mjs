@@ -59,7 +59,7 @@ before(async () => {
 	__test.setQuery(({ options: queryOptions }) => {
 		options = queryOptions;
 		const gen = (async function* () {
-			yield { type: "system", subtype: "init", session_id: "cc-query-options" };
+			yield { type: "system", subtype: "init", session_id: queryOptions.sessionId ?? queryOptions.resume };
 			yield { type: "result", subtype: "success", is_error: false, result: "ok" };
 		})();
 		gen.interrupt = async () => {};
