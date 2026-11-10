@@ -29,6 +29,15 @@ function versionRank(id: string): { family: string; tuple: [number, number] } {
 // entry with the same id replaces the one here.
 const MODELS_AHEAD_OF_CATALOG = [
 	{
+		id: "claude-fable-5-2",
+		name: "Claude Fable 5.2",
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: ONE_M_CONTEXT,
+		maxTokens: 128_000,
+		thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" },
+	},
+	{
 		id: "claude-haiku-5-5",
 		name: "Claude Haiku 5.5",
 		reasoning: true,
@@ -84,8 +93,9 @@ type ClaudeCodeRuntimeModel = {
 };
 
 // Measured Claude Agent SDK behavior - see diag/CONTEXT-SIZE.md:
-// - The `[1m]` suffix is the only reliable way to request 1M context through
-//   the SDK; bare ids serve 200K.
+// - The `[1m]` suffix is the reliable way to request 1M context through the
+//   SDK. Bare ids serve 1M for current models on Pro, but older models and some
+//   Max-plan measurements serve 200K.
 // - An unentitled `[1m]` id is rejected outright (400/429), failing every turn
 //   — worse than serving 200K, so the default is bare id at 200K and only
 //   measured-good ids get `[1m]`.
@@ -99,6 +109,7 @@ type ClaudeCodeRuntimeModel = {
 const MEASURED_ONE_M = new Set([
 	"claude-fable-5",
 	"claude-fable-5-1",
+	"claude-fable-5-2",
 	"claude-opus-5-5",
 	"claude-opus-5",
 	"claude-opus-4-8",
