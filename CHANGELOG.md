@@ -2,6 +2,7 @@
 
 ## UNRELEASED
 
+- **Add: Claude Fable 5.2** — `claude-bridge/claude-fable-5-2` appears in `/model` on pi 1.5.0 too and runs at 1M through `[1m]`; the Agent SDK moves to 0.3.321, the first version that knows the model.
 - **Fix: isolated summaries record the SDK result usage** — Compactions and other one-off summaries ended the stream with all-zero usage; the stream now carries the result message's input, cache and output tokens through the existing usage counters.
 - **Add: plan usage readings in the tui-dash usage ledger** — Each `rate_limit_event` is appended as a `claude-headless-reading` entry tagged with the session's `CLAUDE_CONFIG_DIR`, when tui-dash's state folder exists.
 - **Fix: pi 1.5.0 support** — The prompt guard recognises pi 1.5.0's reworded preamble as well as 1.4.0's, so pi's harness is refused instead of forwarded; AskClaude's `mode` and `thinking` parameters keep their types under pi-ai 1.5.0's `StringEnum`.

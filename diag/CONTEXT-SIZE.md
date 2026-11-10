@@ -119,6 +119,9 @@ one, and no fable id serves that condition at all. `sonnet-5` and `opus-4-8`
 bare rose 200K → 1M. `fable-5-1` was not re-probed and is assumed to share
 fable-5's gate.
 
+Measured 2026-11-10 on the main Claude account, SDK 0.3.321 with CC 2.1.321:
+`fable-5-2` serves 1M from both `[1m]` and the bare id.
+
 ## Error shapes
 
 Rejected `[1m]` turns surface in the SDK message stream, not `result.errors[]`

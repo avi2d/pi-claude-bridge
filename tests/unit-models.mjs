@@ -78,16 +78,24 @@ describe("MODELS projection", () => {
 		assert.equal(haiku.maxTokens, 128000);
 	});
 
+	it("lists claude-fable-5-2 with pi-ai 1.5.1's fields instead of hiding it behind pi-ai 1.5.0's catalog", () => {
+		const fable = find(buildModels(withModelsAheadOfCatalog(getModels("anthropic"))), "claude-fable-5-2");
+		assert.deepEqual(
+			{ name: fable?.name, reasoning: fable?.reasoning, input: fable?.input, contextWindow: fable?.contextWindow, maxTokens: fable?.maxTokens, thinkingLevelMap: fable?.thinkingLevelMap },
+			{ name: "Claude Fable 5.2", reasoning: true, input: ["text", "image"], contextWindow: 1000000, maxTokens: 128000, thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" } },
+		);
+	});
+
 	it("a catalog entry for claude-haiku-5-5 replaces the bridge's own", () => {
 		const catalog = [mockPiAiModel("claude-haiku-5-5", { name: "from pi-ai" })];
 		const models = buildModels(withModelsAheadOfCatalog(catalog));
-		assert.deepEqual(models.map((m) => [m.id, m.name]), [["claude-haiku-5-5", "from pi-ai"]]);
+		assert.deepEqual(models.filter((m) => m.id === "claude-haiku-5-5").map((m) => m.name), ["from pi-ai"]);
 	});
 });
 
 describe("Claude Code runtime policy", () => {
 	it("measured-1M ids send [1m] on every plan", () => {
-		for (const id of ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5"]) {
+		for (const id of ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-fable-5", "claude-fable-5-1", "claude-fable-5-2", "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5"]) {
 			assert.deepEqual(resolveClaudeCodeRuntimeModel(oneM(id), PRO), { cliModelId: `${id}[1m]`, contextWindow: 1000000 });
 		}
 	});
@@ -169,6 +177,10 @@ it("claude-haiku-5-5 registers as 1M on Pro", () => {
 	const haiku = find(applyLongContext(buildModels(withModelsAheadOfCatalog(getModels("anthropic"))), PRO), "claude-haiku-5-5");
 	assert.equal(haiku.contextWindow, 1000000);
 	assert.equal(haiku.name, "Claude Haiku 5.5 1M");
+});
+
+it("claude-fable-5-2 requests [1m] at 1M rather than the bare 200K fallback for unmeasured ids", () => {
+	assert.deepEqual(resolveClaudeCodeRuntimeModel({ id: "claude-fable-5-2" }, PRO), { cliModelId: "claude-fable-5-2[1m]", contextWindow: 1000000 });
 });
 
 it("claude-opus-5-5 requests 1M on Pro", () => {
