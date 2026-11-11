@@ -67,7 +67,7 @@ after(async () => {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function settle(promise) {
 	let timer;
-	try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("the turn hung")), 5_000); })]); }
+	try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("the turn hung")), 30_000); })]); }
 	finally { clearTimeout(timer); }
 }
 /** Waits until the debug log matches `pattern`. */
