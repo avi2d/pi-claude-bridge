@@ -2,10 +2,11 @@
 
 ## UNRELEASED
 
-- **Add: Claude Fable 5.2** — `claude-bridge/claude-fable-5-2` appears in `/model` on pi 1.5.0 too and runs at 1M through `[1m]`; the Agent SDK moves to 0.3.321, the first version that knows the model.
+- **Fix: tool calls rejected by Claude Code no longer hang the turn (#218)** — We now fail the turn if a tool call is rejected (e.g. because Claude Code permission hook blocked). Running tools are not canceled or undone. Unknown and wrong-case tool names are intentionally ignored so CC can retry itself. If CC sends invalid arguments it can now require a new user prompt to continue. Thanks @sonSunnoi.
+- **Add: Claude Mythos 5.2 and 5.1 with 1M context (#259)** — pi-ai doesn't list these access-gated models, so the bridge now adds them, cloned from the Fable releases they shipped beside. Measured at 1M on Max. Listed last in `/model`; requests fail on accounts without Mythos access. Thanks @borski.
 - **Fix: isolated summaries record the SDK result usage** — Compactions and other one-off summaries ended the stream with all-zero usage; the stream now carries the result message's input, cache and output tokens through the existing usage counters.
 - **Add: plan usage readings in the tui-dash usage ledger** — Each `rate_limit_event` is appended as a `claude-headless-reading` entry tagged with the session's `CLAUDE_CONFIG_DIR`, when tui-dash's state folder exists.
-- **Fix: pi 1.5.0 support** — The prompt guard recognises pi 1.5.0's reworded preamble as well as 1.4.0's, so pi's harness is refused instead of forwarded; AskClaude's `mode` and `thinking` parameters keep their types under pi-ai 1.5.0's `StringEnum`.
+- **Fix: AskClaude's `mode` and `thinking` stay plain string enums on pi 1.5** — They keep their types and wire shape under pi-ai 1.5's `StringEnum`.
 - **Fix: the pi#5581 diagnostic no longer gives stale advice on pi 1.2.0 and later** — pi 1.2.0 runs extension-triggered idle turns through the same `before_agent_start` setup as prompts, so the truncated-prompt error now scopes that cause and its `triggerTurn` workaround to older pi and says the shape has another cause on 1.2.0 and later.
 - **Fix: Claude gets pi's per-tool guidance, and no Claude Code hooks, on the provider path** — Each MCP tool's description now carries the `promptSnippet` and `promptGuidelines` pi renders into its `<tools>` and `<rules>` sections, read from `systemPromptOptions` and inherited by sub-agent prompts; the sections themselves still are not forwarded. `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` is raised so Claude Code's 2,048-char cap does not cut them. Provider queries pass `disableAllHooks`, so the user's SessionStart and UserPromptSubmit hook output no longer lands in pi's conversation; user settings stay loaded for `env` and `apiKeyHelper`. AskClaude is unchanged. `tests/int-cc-contracts.mjs` pins both CC behaviors.
 - **Tests: steering suites follow the model, not the version** — `tests/int-tool-message.mjs` runs on `claude-sonnet-5` (overridable with `BRIDGE_TOOL_MESSAGE_MODEL`) and adds echo and ≤6-of-12 tool-call asserts on models that receive a mid-turn steer as a system message; haiku keeps the structural asserts only. The text-only steer tests start a clean session so a rejected steer cannot poison later turns. `tests/int-cc-contracts.mjs` gains a zero-cost tripwire pinning where CC puts a mid-turn steer after an MCP tool result: a system message on opus-5-5, inside `tool_result.content` on haiku-4-5.
@@ -15,6 +16,14 @@
 - **Tests: the gitStatus contract's control ignores the user's Claude Code settings** — CC merges `~/.claude/settings.json`, so `includeGitInstructions: false` there stripped the snapshot from the default-preset arm and failed the control. It now passes the default, `true`, explicitly.
 - **Tests: temp git repos ignore the machine's hooks and identity** — a global `core.hooksPath` refused the probe-identity commit the gitStatus contract makes in its setup. The temp repo now points `core.hooksPath` at an empty dir and carries its own `user.name`/`user.email`.
 - **Tests: CI runs only the unit tests a pull request reaches** — `npm run test:unit:changed -- <base>` runs each unit test whose import or path references reach a changed file, and the whole suite when `package.json`, the lockfile, `tsconfig.json`, CI config or `tests/lib`/`tests/fixtures` change.
+
+## 0.12.0 — 2026-11-10
+
+- **Add: Claude Fable 5.2 with 1M context** — Agent SDK bumped to 0.3.321 (Claude Code 2.1.321), which knows Fable 5.2; AskClaude's too.
+- **Bump: require pi ≥1.5.1** — Also for AskClaude.
+- **Remove: the system prompt guard** — pi 1.5's prompt no longer trips Anthropic's third-party billing check.
+- **Add: warn when an extension's per-request message keeps rewriting the prompt cache (#246)** — A message added to every request but never saved (for example from a `context` hook, as pi-todo-rail does) makes each request rewrite the whole cache; the bridge now says so once, quoting the message.
+- **Add: warn when Extra Usage is billed with plan limits left** — Claude Code's `overageInUse` without a reached plan limit, or an "out of extra usage" error with none, now points at the system prompt.
 
 ## 0.11.0 — 2026-11-06
 

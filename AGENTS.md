@@ -13,7 +13,7 @@ Five wrong conclusions across two sessions came from skipping the above.
 ## Adding a model
 
 The picker is built from pi-ai's static builtin catalog (`getModels("anthropic")`
-in `src/index.ts`) plus `MODELS_AHEAD_OF_CATALOG` in `src/models.ts`, so an id
+in `src/index.ts`) plus `GATED_MODELS` in `src/models.ts`, so an id
 in neither never appears in `/model`. Check
 `node_modules/@earendil-works/pi-ai/dist/providers/data/anthropic.json`
 before concluding a bridge change made a model reachable. `--model

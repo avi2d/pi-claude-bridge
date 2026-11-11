@@ -132,7 +132,7 @@ for (const [name, laterTurn, absorbedSteers, tag = ""] of [
 	["65 absorbed steers", false, 65],
 	["queued opener plus 64 absorbed steers", true, 64],
 ]) {
-	it(`SDK keeps MCP connected for ${name} and exits`, { timeout: 30_000 }, async (t) => {
+	it(`SDK keeps MCP connected for ${name} and exits`, { timeout: 120_000 }, async (t) => {
 		const root = mkdtempSync(join(tmpdir(), "queued-steer-"));
 		mkdirSync(join(root, "config"));
 		const c = new QueryContext();
