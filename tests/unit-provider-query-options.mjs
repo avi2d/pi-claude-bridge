@@ -15,10 +15,9 @@ process.on("exit", () => rmSync(claudeDir, { recursive: true, force: true }));
 
 const { default: activate, __test } = await import("../src/index.js");
 
-const handlers = new Map();
 let providerConfig;
 activate({
-	on: (event, handler) => handlers.set(event, handler),
+	on: () => {},
 	registerProvider: (_name, config) => { providerConfig = config; },
 	registerTool: () => {},
 });
@@ -48,14 +47,6 @@ async function listTools(server) {
 
 let options;
 before(async () => {
-	handlers.get("before_agent_start")({
-		systemPrompt: SYSTEM_PROMPT,
-		systemPromptOptions: {
-			contextFiles: [], skills: [], selectedTools: ["read", "custom"],
-			toolSnippets: { read: "Read file contents" },
-			toolGuidelines: { read: ["Use read to examine files instead of cat or sed."] },
-		},
-	});
 	__test.setQuery(({ options: queryOptions }) => {
 		options = queryOptions;
 		const gen = (async function* () {
@@ -76,10 +67,10 @@ before(async () => {
 after(() => __test.setQuery(null));
 
 describe("provider query options", () => {
-	it("serves each tool with pi's snippet and guidelines in its description", async () => {
+	it("serves each tool with pi's description, not a second copy of the prompt's tool guidance", async () => {
 		const tools = await listTools(options.mcpServers["custom-tools"]);
 		assert.deepEqual(tools.map(({ name, description }) => ({ name, description })), [
-			{ name: "read", description: `Read file contents\n\n${READ_DESCRIPTION}\n\nGuidelines:\n- Use read to examine files instead of cat or sed.` },
+			{ name: "read", description: READ_DESCRIPTION },
 			{ name: "custom", description: "A tool pi has no prompt contribution for." },
 		]);
 	});
