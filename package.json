@@ -31,6 +31,8 @@
     "test:unit:changed": "node tests/lib/select-unit-tests.mjs",
     "test": "set -a && [ -f .env.test ] && . ./.env.test; set +a; CLAUDE_BRIDGE_TEST_LOG_DIR=$(mktemp -d); export CLAUDE_BRIDGE_TEST_LOG_DIR; npm run test:unit && tests/int-smoke.sh && tests/int-multi-turn.sh && tests/int-cache.sh && node --import tsx --test tests/int-*.mjs && node tests/lib/check-deadlock-logs.mjs \"$CLAUDE_BRIDGE_TEST_LOG_DIR\"",
     "test:usage": "tests/usage-test.sh",
+    "build": "npm pack --dry-run",
+    "lint": "checks-secrets origin/main HEAD",
     "typecheck": "tsc --noEmit"
   },
   "type": "module",
@@ -45,6 +47,7 @@
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.124.0",
+    "@avi2dg/checks": "0.116.0",
     "@earendil-works/pi-ai": "^1.5.1",
     "@earendil-works/pi-coding-agent": "^1.5.1",
     "@earendil-works/pi-tui": "^1.5.1",

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const SHARED_FILES = new Set(["package.json", "package-lock.json", "tsconfig.json", ".github/workflows/ci.yml"]);
+const SHARED_FILES = new Set(["package.json", "package-lock.json", "bun.lock", ".bun-version", ".npmrc", "tsconfig.json", ".github/workflows/ci.yml"]);
 const SHARED_DIRS = ["tests/lib/", "tests/fixtures/"];
 const SOURCE_FILE = /\.(ts|mjs|js)$/;
 const UNIT_TEST = /^tests\/unit-[^/]+\.mjs$/;

@@ -1,88 +1,148 @@
-name: CI
+name: ci
 
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  unit-tests:
-    name: Unit tests
+  changes:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      RELEASE: ${{ ((github.event_name == 'workflow_dispatch' && startsWith(github.ref_name, 'release/')) || (github.event_name == 'pull_request' && github.head_ref == format('release/{0}', github.base_ref) && github.event.pull_request.head.repo.full_name == github.repository)) }}
+    outputs:
+      docs-only: ${{ steps.classify.outputs.docs-only || 'false' }}
+      tests-only: ${{ steps.classify.outputs.tests-only || 'false' }}
+      release: ${{ env.RELEASE }}
     steps:
-      - uses: actions/checkout@v6
+      - if: env.RELEASE != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: npm
-      - run: npm ci
-      # Without a base (workflow_dispatch) the selector runs every unit test.
-      - run: npm run test:unit:changed -- "$BASE_SHA"
+      - if: env.RELEASE != 'true'
+        uses: ./.github/actions/setup
+      - if: env.RELEASE != 'true'
+        id: classify
+        name: classify the change as docs-only, tests-only or full
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-  commit-title:
-    name: Commit title
-    if: github.event_name == 'pull_request'
+        run: bunx checks-ci changes
+
+  static:
+    needs: changes
+    if: needs.changes.outputs.release != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: cancel the run when a push to a draft pull request started it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+        run: bunx checks-ci draft-hold
+      - if: runner.environment == 'github-hosted'
+        name: cache the gitleaks the kit pins
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/avi2dg-checks/gitleaks
+          key: gitleaks-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('node_modules/@avi2dg/checks/src/delivery/gitleaks.ts') }}
+      - run: bunx checks-workflows
+      - run: bun run lint
+      - run: bun run build
+      - run: git diff --exit-code
+      - run: bun run typecheck
+
+  unit:
+    needs: changes
+    if: needs.changes.outputs.release != 'true' && needs.changes.outputs.docs-only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: cancel the run when a push to a draft pull request started it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+        run: bunx checks-ci draft-hold
+      - id: test
+        run: npm run test:unit:changed -- "${{ github.event.pull_request.base.sha }}"
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-${{ job.check_run_id }}
+          path: artifacts/
+          if-no-files-found: ignore
+
+  checks:
+    needs: [changes, static, unit]
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
       statuses: write
+      pull-requests: read
     steps:
-      - id: title
-        name: lint the title
-        env:
-          TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          npm install --prefix "$RUNNER_TEMP/commitlint" --save-exact @commitlint/cli@21.2.4 @commitlint/config-conventional@21.2.4
-          cat > "$RUNNER_TEMP/commitlint/commitlint.config.cjs" <<'EOF'
-          module.exports = {
-            extends: ['@commitlint/config-conventional'],
-            rules: { 'header-max-length': [2, 'always', 89] },
-          };
-          EOF
-          printf '%s\n' "$TITLE" | "$RUNNER_TEMP/commitlint/node_modules/.bin/commitlint" --config "$RUNNER_TEMP/commitlint/commitlint.config.cjs"
-      # A fork pull request's token is read only, so the status write would fail there.
-      - name: report the title as commitlint
-        if: always() && github.event.pull_request.head.repo.full_name == github.repository
-        uses: avi2d/workflows/commitlint-status@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          outcome: ${{ steps.title.outcome }}
-  secrets:
-    name: Secrets scan
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+      - uses: ./.github/actions/setup
+      - name: require every result to be success
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-  typecheck:
-    name: Type check
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
+          RESULTS: ${{ toJSON(needs) }}
+          SKIPS: ${{ needs.changes.outputs.release == 'true' && 'static unit' || needs.changes.outputs.docs-only == 'true' && 'unit' || '' }}
+        run: bunx checks-ci require-success
+      # GitHub keeps a dispatched run's checks off the pull request, so the release pull request reads these statuses.
+      - if: always() && github.event_name == 'workflow_dispatch'
+        name: report the gate on the dispatched commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+          CONTEXT: checks
+          ATTEMPTS: "5"
+        run: bunx checks-ci commit-status
+      - if: always() && github.event_name == 'workflow_dispatch'
+        id: title
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bunx checks-commit-title
+      - if: always() && github.event_name == 'workflow_dispatch'
+        name: report the title as commitlint on the dispatched commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ steps.title.outcome }}
+          CONTEXT: commitlint
+          ATTEMPTS: "5"
+        run: bunx checks-ci commit-status
