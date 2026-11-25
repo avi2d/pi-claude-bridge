@@ -1,0 +1,51 @@
+name: main
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    if: "startsWith(github.event.head_commit.message, 'chore: release ')"
+    runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: run the full test suite on the release commit
+        run: bun run test --full
+
+  release:
+    needs: suite
+    if: ${{ !cancelled() && (needs.suite.result == 'success' || needs.suite.result == 'skipped') }}
+    runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    concurrency:
+      group: main
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+      # npm takes a trusted publish only from the Node it set up with its registry.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: bunx checks-release-tag

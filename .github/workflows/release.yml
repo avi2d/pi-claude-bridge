@@ -1,0 +1,34 @@
+name: release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pull-request:
+    runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    concurrency:
+      group: release-pull-request
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      # A rerun plans the branch tip, not the commit the dispatch named.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: bunx checks-release-pr ci.yml
+      - name: delete the runs held for approval on the branch tip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: release/${{ github.ref_name }}
+        run: bunx checks-ci held-runs
